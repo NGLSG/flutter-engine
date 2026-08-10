@@ -36,8 +36,7 @@ jobs:
           sudo apt-get install -y \
             g++-aarch64-linux-gnu \
             g++-arm-linux-gnueabihf \
-            g++-multilib \
-            gcc-multilib \
+            
             zip
 
       - name: Install depot_tools
