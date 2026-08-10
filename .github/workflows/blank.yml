@@ -1,13 +1,16 @@
-name: Build Android arm64 Engine on arm64 Host
+name: Daily Engine Build (Linux arm64)
 
 on:
   schedule:
     - cron: '0 0 * * *'
   workflow_dispatch:
 
+env:
+  ENGINE_SRC: ${{ github.workspace }}/flutter-engine/src
+
 jobs:
   build:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-latest
     timeout-minutes: 360
 
     strategy:
@@ -18,129 +21,88 @@ jobs:
       - name: Maximize build space
         uses: easimon/maximize-build-space@v4
         with:
-          root-reserve-mb: 1024
-          swap-size-mb: 2048
+          root-reserve-mb: 512
+          swap-size-mb: 1024
           remove-dotnet: 'true'
           remove-haskell: 'true'
           remove-android: 'true'
 
-      - name: Install all system dependencies
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cross-compiler
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            openjdk-17-jdk-headless \
-            clang \
-            lld \
-            cmake \
-            ninja-build \
-            python3 \
-            python3-distutils \
-            curl \
-            git \
-            unzip \
-            zip \
-            pkg-config \
-            libglu1-mesa-dev \
-            libgtk-3-dev \
-            liblzma-dev \
-            libpulse-dev \
-            libasound2-dev \
-            libx11-dev \
-            libxext-dev \
-            libxrender-dev \
-            libxdamage-dev \
-            libxcomposite-dev \
-            libxcursor-dev \
-            libxfixes-dev \
-            libxi-dev \
-            libxrandr-dev \
-            libxtst-dev
+            g++-aarch64-linux-gnu \
+            g++-arm-linux-gnueabihf \
+            g++-multilib \
+            gcc-multilib \
+            zip
 
-      - name: Checkout engine source (no gclient)
-        uses: actions/checkout@v4
-        with:
-          repository: flutter/engine
-          ref: main
-          path: engine
-
-      - name: Setup depot_tools (minimal)
+      - name: Install depot_tools
         run: |
-          # 我们只需要 gn 和 ninja
-          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git --depth 1
-          echo "$(pwd)/depot_tools" >> $GITHUB_PATH
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          echo "${{ github.workspace }}/depot_tools" >> $GITHUB_PATH
 
-      - name: Download Dart SDK for arm64
+      - name: Create .gclient
+        working-directory: ${{ github.workspace }}
         run: |
-          # 获取 Dart arm64 SDK，这是编译引擎必需的
-          DART_VERSION=$(grep -oP '"dart_tag":\s*"([^"]+)"' engine/DEPS | head -1 | cut -d'"' -f4)
-          echo "Dart version from DEPS: ${DART_VERSION}"
-          
-          # 从 Dart 官方下载 arm64 SDK
-          curl -L "https://storage.googleapis.com/dart-archive/channels/stable/release/latest/sdk/dartsdk-linux-arm64-release.zip" \
-            -o dart-sdk.zip
-          unzip dart-sdk.zip -d engine/third_party/dart/tools/sdks/
-          mv engine/third_party/dart/tools/sdks/dart-sdk engine/third_party/dart/tools/sdks/linux-arm64
+          mkdir -p flutter-engine
+          cat > flutter-engine/.gclient << 'EOF'
+          solutions = [
+            {
+              "managed": False,
+              "name": "src/flutter",
+              "url": "https://github.com/flutter/engine.git",
+              "custom_deps": {},
+              "deps_file": "DEPS",
+              "safesync_url": "",
+            },
+          ]
+          EOF
 
-      - name: Setup build environment
+      - name: Sync dependencies
+        working-directory: ${{ github.workspace }}/flutter-engine
         run: |
-          export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64
-          echo "JAVA_HOME=$JAVA_HOME" >> $GITHUB_ENV
-          echo "DEPOT_TOOLS_UPDATE=0" >> $GITHUB_ENV
+          gclient sync --no-history -j$(nproc)
+        timeout-minutes: 120
 
-      - name: Generate build files (release)
-        if: matrix.mode == 'release'
-        working-directory: engine
+      - name: Build engine (${{ matrix.mode }})
+        working-directory: ${{ env.ENGINE_SRC }}
         run: |
           ./flutter/tools/gn \
-            --android \
-            --android-cpu=arm64 \
-            --runtime-mode=release \
+            --target-os android \
+            --android-cpu arm64 \
+            --linux-cpu arm64 \
             --no-goma \
-            --clang \
-            --target-os android
+            --runtime-mode ${{ matrix.mode }}
 
-      - name: Generate build files (profile)
-        if: matrix.mode == 'profile'
-        working-directory: engine
-        run: |
-          ./flutter/tools/gn \
-            --android \
-            --android-cpu=arm64 \
-            --runtime-mode=profile \
-            --no-goma \
-            --clang \
-            --target-os android
+          ninja -C out/android_${{ matrix.mode }}_arm64 \
+            gen_snapshot \
+            flutter.jar \
+            libflutter.so
+        timeout-minutes: 180
 
-      - name: Build gen_snapshot
-        working-directory: engine
-        run: |
-          ninja -C out/android_${{ matrix.mode }}_arm64 gen_snapshot
-
-      - name: Build libflutter.so
-        working-directory: engine
-        run: |
-          ninja -C out/android_${{ matrix.mode }}_arm64 libflutter.so
-
-      - name: Build flutter.jar
-        working-directory: engine
-        run: |
-          ninja -C out/android_${{ matrix.mode }}_arm64 flutter.jar
-
-      - name: Package as linux-x64
+      - name: Package artifacts (as linux-x64)
         run: |
           MODE=${{ matrix.mode }}
-          OUT_DIR=engine/out/android_${MODE}_arm64
-          PKG_DIR=android-arm64-${MODE}/linux-x64
+          OUT_DIR=${{ env.ENGINE_SRC }}/out/android_${MODE}_arm64
+
+          PKG_DIR=${{ runner.temp }}/android-arm64-${MODE}/linux-x64
           mkdir -p ${PKG_DIR}
-          
+
           cp ${OUT_DIR}/gen_snapshot  ${PKG_DIR}/
-          cp ${OUT_DIR}/libflutter.so ${PKG_DIR}/
           cp ${OUT_DIR}/flutter.jar   ${PKG_DIR}/
-          
-          tar -czf engine-android-arm64-${MODE}-linux-x64.tar.gz android-arm64-${MODE}
+          cp ${OUT_DIR}/libflutter.so ${PKG_DIR}/
+
+          cd ${PKG_DIR}/../..
+          tar -czf ${{ runner.temp }}/engine-android-arm64-${MODE}-linux-x64.tar.gz \
+            android-arm64-${MODE}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: engine-android-arm64-${{ matrix.mode }}-linux-x64
-          path: engine-android-arm64-${{ matrix.mode }}-linux-x64.tar.gz
+          path: ${{ runner.temp }}/engine-android-arm64-${{ matrix.mode }}-linux-x64.tar.gz
+          retention-days: 30
