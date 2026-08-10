@@ -1,0 +1,96 @@
+name: Daily Engine Build (Linux arm64)
+
+on:
+  schedule:
+    # 每天 UTC 0 点触发
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+env:
+  ENGINE_SRC: ${{ github.workspace }}/src
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+
+    strategy:
+      matrix:
+        mode: [release, profile]
+
+    steps:
+      - name: Checkout engine source
+        uses: actions/checkout@v4
+        with:
+          repository: flutter/engine
+          ref: main
+          path: src/flutter
+
+      - name: Install depot_tools
+        run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          echo "${{ github.workspace }}/depot_tools" >> $GITHUB_PATH
+
+      - name: Create .gclient
+        working-directory: ${{ github.workspace }}
+        run: |
+          cat > .gclient << 'EOF'
+          solutions = [
+            {
+              "managed": False,
+              "name": "src/flutter",
+              "url": "https://github.com/flutter/engine.git",
+              "custom_deps": {},
+              "deps_file": "DEPS",
+              "safesync_url": "",
+            },
+          ]
+          EOF
+
+      - name: Sync dependencies
+        working-directory: ${{ github.workspace }}
+        run: |
+          gclient sync --no-history -j$(nproc)
+        timeout-minutes: 120
+
+      - name: Generate build files
+        working-directory: ${{ env.ENGINE_SRC }}
+        run: |
+          cd flutter
+          ./tools/gn \
+            --android \
+            --android-cpu=arm64 \
+            --runtime-mode=${{ matrix.mode }} \
+            --no-goma
+
+      - name: Build engine
+        working-directory: ${{ env.ENGINE_SRC }}
+        run: |
+          ninja -C out/android_${{ matrix.mode }}_arm64 \
+            gen_snapshot \
+            flutter.jar \
+            libflutter.so
+        timeout-minutes: 180
+
+      - name: Package artifacts (as linux-x64)
+        run: |
+          MODE=${{ matrix.mode }}
+          OUT_DIR=${{ env.ENGINE_SRC }}/out/android_${MODE}_arm64
+
+          PKG_DIR=${{ runner.temp }}/android-arm64-${MODE}/linux-x64
+          mkdir -p ${PKG_DIR}
+
+          cp ${OUT_DIR}/gen_snapshot  ${PKG_DIR}/
+          cp ${OUT_DIR}/flutter.jar   ${PKG_DIR}/
+          cp ${OUT_DIR}/libflutter.so ${PKG_DIR}/
+
+          cd ${PKG_DIR}/../..
+          tar -czf ${{ runner.temp }}/engine-android-arm64-${MODE}-linux-x64.tar.gz \
+            android-arm64-${MODE}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-android-arm64-${{ matrix.mode }}-linux-x64
+          path: ${{ runner.temp }}/engine-android-arm64-${{ matrix.mode }}-linux-x64.tar.gz
+          retention-days: 30
