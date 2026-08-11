@@ -1,61 +1,66 @@
-name: Flutter Engine ARM64 Android
+name: Flutter gen_snapshot ARM64
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 jobs:
-  build-engine-arm64-android:
+
+  build:
+
+    strategy:
+      fail-fast: false
+      matrix:
+        mode:
+          - release
+          - profile
+
 
     runs-on: ubuntu-latest
 
+
     steps:
 
-    - name: Maximize build space
+    - name: Free space
       uses: easimon/maximize-build-space@v4
       with:
-        root-reserve-mb: 512
-        swap-size-mb: 2048
+        root-reserve-mb: 256
+        swap-size-mb: 4096
         remove-dotnet: true
         remove-haskell: true
         remove-android: true
 
 
-    - name: Checkout
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
 
-    - name: Install dependencies
+    - name: Dependencies
       run: |
+
         sudo apt update
 
         sudo apt install -y \
           git \
-          curl \
-          unzip \
-          zip \
           ninja-build \
           clang \
-          cmake \
-          pkg-config \
           python3 \
           python-is-python3 \
-          g++-aarch64-linux-gnu \
-          gcc-aarch64-linux-gnu
+          zip \
+          g++-aarch64-linux-gnu
 
 
-    - name: Install depot_tools
+
+    - name: depot_tools
+
       run: |
 
-        git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+        git clone --depth=1 \
+        https://chromium.googlesource.com/chromium/tools/depot_tools.git
 
         echo "$PWD/depot_tools" >> $GITHUB_PATH
 
 
 
-    - name: Fetch Flutter Engine
+    - name: Fetch engine
 
       run: |
 
@@ -63,34 +68,19 @@ jobs:
 
         cd flutter-engine
 
+
         gclient config \
-          --name src/flutter \
-          https://github.com/flutter/engine.git
-
-        gclient sync
+        --name src/flutter \
+        https://github.com/flutter/engine.git
 
 
-
-    - name: Build Android ARM64 Release
-
-      run: |
-
-        cd flutter-engine/src
-
-
-        ./flutter/tools/gn \
-          --target-os android \
-          --android-cpu arm64 \
-          --runtime-mode release \
-          --no-goma
-
-
-        ninja \
-          -C out/android_release_arm64
+        gclient sync \
+        --no-history \
+        --shallow
 
 
 
-    - name: Build Android ARM64 Profile
+    - name: GN
 
       run: |
 
@@ -100,12 +90,23 @@ jobs:
         ./flutter/tools/gn \
           --target-os android \
           --android-cpu arm64 \
-          --runtime-mode profile \
-          --no-goma
+          --linux-cpu arm64 \
+          --runtime-mode ${{ matrix.mode }} \
+          --no-goma \
+          --disable-unittests
+
+
+
+    - name: Build gen_snapshot only
+
+      run: |
+
+        cd flutter-engine/src
 
 
         ninja \
-          -C out/android_profile_arm64
+          -C out/android_${{ matrix.mode }}_arm64 \
+          gen_snapshot
 
 
 
@@ -113,40 +114,28 @@ jobs:
 
       run: |
 
-        cd flutter-engine/src/out
+        mkdir output
 
 
-        zip -q -r android_release_arm64.zip \
-          android_release_arm64
+        cp \
+        flutter-engine/src/out/android_${{ matrix.mode }}_arm64/gen_snapshot \
+        output/
 
 
-        zip -q -r android_profile_arm64.zip \
-          android_profile_arm64
-
-
-
-    - name: Get date
-
-      id: date
-
-      run: |
-
-        echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+        zip \
+        gen_snapshot_android_arm64_${{ matrix.mode }}_linux_arm64.zip \
+        output/gen_snapshot
 
 
 
-    - name: Release
+    - name: Upload
 
-      uses: ncipollo/release-action@v1
+      uses: actions/upload-artifact@v4
 
       with:
 
-        artifacts: |
-          flutter-engine/src/out/android_release_arm64.zip
-          flutter-engine/src/out/android_profile_arm64.zip
+        name:
+          gen_snapshot-${{ matrix.mode }}
 
-        tag: Flutter-Engine-Android-ARM64-${{ steps.date.outputs.date }}
-
-        token: ${{ secrets.RELEASE_TOKEN }}
-
-        allowUpdates: true
+        path:
+          gen_snapshot_android_arm64_${{ matrix.mode }}_linux_arm64.zip
