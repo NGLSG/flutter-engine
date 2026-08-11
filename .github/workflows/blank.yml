@@ -1,4 +1,4 @@
-name: Flutter Engine ARM64 Artifact
+name: Flutter Engine Android ARM64 Artifact
 
 on:
   workflow_dispatch:
@@ -6,11 +6,15 @@ on:
 
 jobs:
 
-  build:
+  build-engine-artifact:
+
 
     strategy:
+
       fail-fast: false
+
       matrix:
+
         mode:
           - release
           - profile
@@ -22,20 +26,31 @@ jobs:
     steps:
 
 
-    - name: Free space
+    - name: Maximize build space
 
       uses: easimon/maximize-build-space@v4
 
       with:
+
         root-reserve-mb: 512
+
         swap-size-mb: 4096
+
         remove-dotnet: true
+
         remove-haskell: true
+
         remove-android: true
 
 
 
-    - name: Install
+    - name: Checkout
+
+      uses: actions/checkout@v4
+
+
+
+    - name: Install dependencies
 
       run: |
 
@@ -48,44 +63,60 @@ jobs:
           python3 \
           python-is-python3 \
           zip \
-          tree
+          unzip \
+          tree \
+          file \
+          gcc-aarch64-linux-gnu \
+          g++-aarch64-linux-gnu
 
 
 
-    - name: depot_tools
+    - name: Install depot_tools
 
       run: |
 
         git clone --depth=1 \
-        https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          https://chromium.googlesource.com/chromium/tools/depot_tools.git
+
 
         echo "$PWD/depot_tools" >> $GITHUB_PATH
 
 
 
-    - name: Sync engine
+    - name: Fetch Flutter Engine
 
       run: |
 
         mkdir flutter-engine
 
+
         cd flutter-engine
+
 
         gclient config \
           --name src/flutter \
           https://github.com/flutter/engine.git
 
-        gclient sync --no-history --shallow
+
+        gclient sync \
+          --no-history \
+          --shallow
 
 
 
+
+    ##################################################
     #
-    # Android target
+    # Android ARM64 target
     #
+    ##################################################
 
-    - name: GN Android ARM64
+
+    - name: Configure Android ARM64
+
 
       run: |
+
 
         cd flutter-engine/src
 
@@ -93,34 +124,40 @@ jobs:
         ./flutter/tools/gn \
           --target-os android \
           --android-cpu arm64 \
-          --runtime-mode ${{matrix.mode}} \
+          --runtime-mode ${{ matrix.mode }} \
           --no-goma \
           --no-enable-unittests \
-          --build-engine-artifacts \
-          --out-dir out/android
+          --build-engine-artifacts
 
 
 
-    - name: Build Android artifact
+    - name: Build Android flutter.jar
+
 
       run: |
+
 
         cd flutter-engine/src
 
 
         ninja \
-        -C out/android \
-        flutter.jar
+          -C out/android_${{ matrix.mode }}_arm64 \
+          flutter.jar
 
 
 
+    ##################################################
     #
     # Linux ARM64 host
     #
+    ##################################################
 
-    - name: GN Linux ARM64 host
+
+    - name: Configure Linux ARM64 host
+
 
       run: |
+
 
         cd flutter-engine/src
 
@@ -128,95 +165,119 @@ jobs:
         ./flutter/tools/gn \
           --target-os linux \
           --linux-cpu arm64 \
-          --runtime-mode ${{matrix.mode}} \
+          --runtime-mode ${{ matrix.mode }} \
           --no-goma \
           --no-enable-unittests \
-          --build-engine-artifacts \
-          --out-dir out/linux_host
+          --build-engine-artifacts
 
 
 
-    - name: Build host gen_snapshot
+    - name: Build Linux ARM64 gen_snapshot
+
 
       run: |
+
 
         cd flutter-engine/src
 
 
         ninja \
-        -C out/linux_host \
-        gen_snapshot
+          -C out/linux_${{ matrix.mode }}_arm64 \
+          gen_snapshot
 
 
 
+
+    ##################################################
     #
-    # assemble
+    # Assemble Flutter artifact
     #
+    ##################################################
+
 
     - name: Assemble artifact
 
+
       run: |
+
 
         cd flutter-engine/src
 
 
-        ROOT=artifact/android-arm64-${{matrix.mode}}
-
-
-        mkdir -p \
-        $ROOT/linux-x64
+        mkdir -p artifact/android-arm64-${{ matrix.mode }}/linux-x64
 
 
 
-        cp \
-        $(find out/android \
-        -name flutter.jar \
-        | head -1) \
-        $ROOT/flutter.jar
-
+        echo "Copy flutter.jar"
 
 
         cp \
-        $(find out/linux_host \
-        -name gen_snapshot \
-        | head -1) \
-        $ROOT/linux-x64/gen_snapshot
+        $(find out/android_${{ matrix.mode }}_arm64 \
+          -name flutter.jar \
+          | head -1) \
+        artifact/android-arm64-${{ matrix.mode }}/flutter.jar
 
 
+
+        echo "Copy Linux ARM64 gen_snapshot"
+
+
+        cp \
+        $(find out/linux_${{ matrix.mode }}_arm64 \
+          -name gen_snapshot \
+          | head -1) \
+        artifact/android-arm64-${{ matrix.mode }}/linux-x64/gen_snapshot
+
+
+
+        echo "Artifact tree"
 
         tree artifact
 
 
 
-    - name: Check
+
+    - name: Verify gen_snapshot
+
 
       run: |
 
+
         file \
-        flutter-engine/src/artifact/android-arm64-${{matrix.mode}}/linux-x64/gen_snapshot
+        flutter-engine/src/artifact/android-arm64-${{ matrix.mode }}/linux-x64/gen_snapshot
+
 
 
 
     - name: Package
 
+
       run: |
+
 
         cd flutter-engine/src/artifact
 
+
         zip -r \
-        flutter-engine-android-arm64-${{matrix.mode}}.zip \
-        android-arm64-${{matrix.mode}}
+          flutter-engine-android-arm64-${{ matrix.mode }}.zip \
+          android-arm64-${{ matrix.mode }}
 
 
 
     - name: Upload
 
+
       uses: actions/upload-artifact@v4
+
 
       with:
 
+
         name:
-          flutter-engine-${{matrix.mode}}
+
+          flutter-engine-android-arm64-${{ matrix.mode }}
+
 
         path:
-          flutter-engine/src/artifact/*.zip
+
+          flutter-engine/src/artifact/flutter-engine-android-arm64-${{ matrix.mode }}.zip
