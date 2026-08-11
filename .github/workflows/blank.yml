@@ -11,7 +11,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 600
 
     strategy:
       matrix:
@@ -36,13 +36,22 @@ jobs:
           sudo apt-get install -y \
             g++-aarch64-linux-gnu \
             g++-arm-linux-gnueabihf \
-            
             zip
 
       - name: Install depot_tools
         run: |
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
           echo "${{ github.workspace }}/depot_tools" >> $GITHUB_PATH
+
+      - name: Cache gclient sync
+        uses: actions/cache@v4
+        with:
+          path: |
+            flutter-engine/src
+            flutter-engine/.cipd
+          key: flutter-engine-${{ runner.os }}-${{ hashFiles('flutter-engine/.gclient') }}
+          restore-keys: |
+            flutter-engine-${{ runner.os }}-
 
       - name: Create .gclient
         working-directory: ${{ github.workspace }}
@@ -64,8 +73,8 @@ jobs:
       - name: Sync dependencies
         working-directory: ${{ github.workspace }}/flutter-engine
         run: |
-          gclient sync --no-history -j$(nproc)
-        timeout-minutes: 120
+          gclient sync --no-history --shallow -j$(nproc)
+        timeout-minutes: 240
 
       - name: Build engine (${{ matrix.mode }})
         working-directory: ${{ env.ENGINE_SRC }}
@@ -81,7 +90,7 @@ jobs:
             gen_snapshot \
             flutter.jar \
             libflutter.so
-        timeout-minutes: 180
+        timeout-minutes: 240
 
       - name: Package artifacts (as linux-x64)
         run: |
