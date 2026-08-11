@@ -121,7 +121,6 @@ jobs:
             cp "$OUT_LINUX/gen_snapshot" "$ART_DIR/linux-arm64/gen_snapshot"
           }
 
-          build_mode profile
           build_mode release
 
       - name: Verify Architecture Integrity
