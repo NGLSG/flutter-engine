@@ -1,11 +1,10 @@
-name: Flutter Engine Android ARM64 Host Artifacts
+name: Flutter Engine Daily Build
 
 on:
   workflow_dispatch:
 
-  push:
-    branches:
-      - main
+  schedule:
+    - cron: "00 16 * * *"
 
 
 permissions:
@@ -16,35 +15,25 @@ jobs:
 
   build-engine:
 
+    name: Build Android ${{ matrix.arch }} Release
+
     strategy:
       fail-fast: false
 
       matrix:
         include:
 
-          - android_cpu: arm
-            artifact_cpu: arm
-            mode: release
+          - arch: x64
+            android_cpu: x64
+            artifact_dir: android-x64-release
 
-          - android_cpu: arm
-            artifact_cpu: arm
-            mode: profile
+          - arch: arm64
+            android_cpu: arm64
+            artifact_dir: android-arm64-release
 
-          - android_cpu: arm64
-            artifact_cpu: arm64
-            mode: release
-
-          - android_cpu: arm64
-            artifact_cpu: arm64
-            mode: profile
-
-          - android_cpu: x64
-            artifact_cpu: x64
-            mode: release
-
-          - android_cpu: x64
-            artifact_cpu: x64
-            mode: profile
+          - arch: arm
+            android_cpu: arm
+            artifact_dir: android-arm-release
 
 
     runs-on: ubuntu-latest
@@ -53,472 +42,314 @@ jobs:
     steps:
 
 
-    - name: Maximize build space
+      - name: Maximize build space
 
-      uses: easimon/maximize-build-space@v4
+        uses: easimon/maximize-build-space@v4
 
-      with:
-        root-reserve-mb: 512
-        swap-size-mb: 4096
-        remove-dotnet: true
-        remove-haskell: true
-        remove-android: true
+        with:
+          root-reserve-mb: 512
+          swap-size-mb: 4096
+          remove-dotnet: true
+          remove-haskell: true
+          remove-android: true
 
 
-    - name: Checkout
+      - name: Install dependencies
 
-      uses: actions/checkout@v4
+        run: |
 
+          sudo apt-get update
 
-    - name: Install dependencies
+          sudo apt-get install -y \
+            git \
+            ninja-build \
+            clang \
+            python3 \
+            python-is-python3 \
+            zip \
+            unzip \
+            tree \
+            file
 
-      run: |
 
-        sudo apt-get update
+      - name: Install depot_tools
 
-        sudo apt-get install -y \
-          git \
-          ninja-build \
-          clang \
-          python3 \
-          python-is-python3 \
-          zip \
-          unzip \
-          tree \
-          file \
-          gcc-aarch64-linux-gnu \
-          g++-aarch64-linux-gnu
+        run: |
 
+          git clone --depth=1 \
+            https://chromium.googlesource.com/chromium/tools/depot_tools.git
 
-    - name: Install depot_tools
+          echo "$PWD/depot_tools" >> "$GITHUB_PATH"
 
-      run: |
 
-        git clone --depth=1 \
-          https://chromium.googlesource.com/chromium/tools/depot_tools.git
+      - name: Fetch Flutter Engine
 
-        echo "$PWD/depot_tools" >> "$GITHUB_PATH"
+        run: |
 
+          mkdir flutter-engine
 
-    - name: Fetch Flutter Engine
+          cd flutter-engine
 
-      run: |
+          gclient config \
+            --name src/flutter \
+            https://github.com/flutter/engine.git
 
-        mkdir flutter-engine
+          gclient sync \
+            --no-history \
+            --shallow
 
-        cd flutter-engine
 
-        gclient config \
-          --name src/flutter \
-          https://github.com/flutter/engine.git
+      #
+      # Android target
+      #
+      # This produces the Android flutter.jar
+      #
 
-        gclient sync \
-          --no-history \
-          --shallow
+      - name: Configure Android ${{ matrix.arch }}
 
+        run: |
 
-    - name: Configure Android Engine
+          cd flutter-engine/src
 
-      run: |
+          ./flutter/tools/gn \
+            --target-os android \
+            --android-cpu ${{ matrix.android_cpu }} \
+            --runtime-mode release \
+            --no-goma \
+            --no-enable-unittests \
+            --build-engine-artifacts
 
-        cd flutter-engine/src
 
-        ./flutter/tools/gn \
-          --target-os android \
-          --android-cpu ${{ matrix.android_cpu }} \
-          --linux-cpu arm64 \
-          --runtime-mode ${{ matrix.mode }} \
-          --no-goma \
-          --no-enable-unittests \
-          --build-engine-artifacts
+      - name: Build Android flutter.jar
 
+        run: |
 
-    - name: Determine Android output directory
+          cd flutter-engine/src
 
-      id: output
+          ANDROID_OUT="out/android_release_${{ matrix.arch }}"
 
-      run: |
+          echo "Android output:"
+          echo "$ANDROID_OUT"
 
-        cd flutter-engine/src
+          test -f "$ANDROID_OUT/build.ninja"
 
+          ninja \
+            -C "$ANDROID_OUT" \
+            flutter.jar
 
-        OUT_DIR="out/android_${{ matrix.mode }}_${{ matrix.artifact_cpu }}"
 
+      #
+      # Linux ARM64 host
+      #
+      # gen_snapshot MUST be Linux ARM64.
+      #
+      # It is NOT built from the Android GN configuration.
+      #
 
-        echo "OUT_DIR=$OUT_DIR" >> "$GITHUB_OUTPUT"
+      - name: Configure Linux ARM64 host
 
+        run: |
 
-        echo "Android output directory:"
-        echo "$OUT_DIR"
+          cd flutter-engine/src
 
+          ./flutter/tools/gn \
+            --target-os linux \
+            --linux-cpu arm64 \
+            --runtime-mode release \
+            --no-goma \
+            --no-enable-unittests \
+            --build-engine-artifacts
 
-        test -f "$OUT_DIR/build.ninja"
 
+      - name: Build Linux ARM64 gen_snapshot
 
-    - name: Build Android Flutter JAR and ARM64 host gen_snapshot
+        run: |
 
-      run: |
+          cd flutter-engine/src
 
-        cd flutter-engine/src
+          LINUX_OUT="out/linux_release_arm64"
 
+          echo "Linux ARM64 host output:"
+          echo "$LINUX_OUT"
 
-        OUT_DIR="${{ steps.output.outputs.OUT_DIR }}"
+          test -f "$LINUX_OUT/build.ninja"
 
+          ninja \
+            -C "$LINUX_OUT" \
+            gen_snapshot
 
-        ninja \
-          -C "$OUT_DIR" \
-          flutter.jar \
-          gen_snapshot
 
+      #
+      # Assemble the exact Flutter artifact layout.
+      #
+      # IMPORTANT:
+      #
+      # Flutter expects:
+      #
+      # android-xxx-release/
+      # └── linux-arm64/
+      #     └── gen_snapshot
+      #
 
-    - name: Locate Android ARM64 host gen_snapshot
+      - name: Assemble artifact
 
-      id: snapshot
+        run: |
 
-      run: |
+          cd flutter-engine/src
 
-        cd flutter-engine/src
+          ANDROID_OUT="out/android_release_${{ matrix.arch }}"
+          LINUX_OUT="out/linux_release_arm64"
 
+          EXPORT_ROOT="artifact"
 
-        OUT_DIR="${{ steps.output.outputs.OUT_DIR }}"
+          ARTIFACT="${EXPORT_ROOT}/${{ matrix.artifact_dir }}"
 
+          rm -rf "$EXPORT_ROOT"
 
-        echo "Searching Android output for gen_snapshot..."
+          mkdir -p \
+            "$ARTIFACT/linux-arm64"
 
 
-        find "$OUT_DIR" \
-          -type f \
-          -name gen_snapshot \
-          -print
+          echo "Copy flutter.jar"
 
+          FLUTTER_JAR="$ANDROID_OUT/flutter.jar"
 
-        SNAPSHOT=""
+          test -f "$FLUTTER_JAR"
 
+          cp \
+            "$FLUTTER_JAR" \
+            "$ARTIFACT/flutter.jar"
 
-        while IFS= read -r FILE
-        do
 
-          if file "$FILE" | grep -q "ARM aarch64"
-          then
+          echo "Copy Linux ARM64 gen_snapshot"
 
-            if file "$FILE" | grep -q "GNU/Linux"
-            then
+          GEN_SNAPSHOT="$LINUX_OUT/gen_snapshot"
 
-              SNAPSHOT="$FILE"
+          test -f "$GEN_SNAPSHOT"
 
-              break
+          cp \
+            "$GEN_SNAPSHOT" \
+            "$ARTIFACT/linux-arm64/gen_snapshot"
 
-            fi
 
+          echo ""
+          echo "Artifact tree:"
+          tree "$EXPORT_ROOT"
+
+
+      #
+      # Verify that gen_snapshot is REALLY Linux ARM64.
+      #
+
+      - name: Verify gen_snapshot architecture
+
+        run: |
+
+          cd flutter-engine/src
+
+          GEN_SNAPSHOT="artifact/${{ matrix.artifact_dir }}/linux-arm64/gen_snapshot"
+
+          echo "Checking:"
+          echo "$GEN_SNAPSHOT"
+
+          file "$GEN_SNAPSHOT"
+
+          readelf -l "$GEN_SNAPSHOT" | grep "Requesting program interpreter"
+
+          echo ""
+          echo "Expected:"
+          echo "Linux ARM64"
+          echo "NOT Android /system/bin/linker64"
+
+
+          if file "$GEN_SNAPSHOT" | grep -q "/system/bin/linker64"; then
+            echo "ERROR: gen_snapshot is an Android executable."
+            exit 1
           fi
 
-        done < <(
-          find "$OUT_DIR" \
-            -type f \
-            -name gen_snapshot
-        )
+
+          if ! file "$GEN_SNAPSHOT" | grep -q "ARM aarch64"; then
+            echo "ERROR: gen_snapshot is not ARM64."
+            exit 1
+          fi
 
 
-        if [ -z "$SNAPSHOT" ]
-        then
-
-          echo "ERROR: Linux ARM64 gen_snapshot was not found."
-
-          echo ""
-
-          echo "All gen_snapshot files:"
-
-          find "$OUT_DIR" \
-            -type f \
-            -name gen_snapshot \
-            -exec file {} \;
-
-          exit 1
-
-        fi
+          if ! file "$GEN_SNAPSHOT" | grep -q "GNU/Linux"; then
+            echo "ERROR: gen_snapshot is not a Linux executable."
+            exit 1
+          fi
 
 
-        echo "Selected host gen_snapshot:"
-        echo "$SNAPSHOT"
+      #
+      # Verify flutter.jar
+      #
+
+      - name: Verify flutter.jar
+
+        run: |
+
+          cd flutter-engine/src
+
+          JAR="artifact/${{ matrix.artifact_dir }}/flutter.jar"
+
+          test -f "$JAR"
+
+          echo "flutter.jar:"
+          ls -lh "$JAR"
 
 
-        echo "SNAPSHOT=$SNAPSHOT" >> "$GITHUB_OUTPUT"
+      #
+      # Package only this architecture.
+      #
 
+      - name: Package
 
-    - name: Verify host gen_snapshot
+        run: |
 
-      run: |
+          cd flutter-engine/src/artifact
 
-        cd flutter-engine/src
+          ZIP="flutter-engine-${{ matrix.arch }}-release.zip"
 
-
-        SNAPSHOT="${{ steps.snapshot.outputs.SNAPSHOT }}"
-
-
-        echo "gen_snapshot:"
-        echo "$SNAPSHOT"
-
-
-        file "$SNAPSHOT"
-
-
-        echo ""
-
-
-        echo "Checking ELF..."
-
-
-        if file "$SNAPSHOT" | grep -q "/system/bin/linker64"
-        then
-
-          echo "ERROR: Android gen_snapshot selected."
-
-          exit 1
-
-        fi
-
-
-        if ! file "$SNAPSHOT" | grep -q "ARM aarch64"
-        then
-
-          echo "ERROR: gen_snapshot is not ARM64."
-
-          exit 1
-
-        fi
-
-
-        if ! file "$SNAPSHOT" | grep -q "GNU/Linux"
-        then
-
-          echo "ERROR: gen_snapshot is not Linux."
-
-          exit 1
-
-        fi
-
-
-    - name: Locate flutter.jar
-
-      id: jar
-
-      run: |
-
-        cd flutter-engine/src
-
-
-        OUT_DIR="${{ steps.output.outputs.OUT_DIR }}"
-
-
-        JAR="$OUT_DIR/flutter.jar"
-
-
-        if [ ! -f "$JAR" ]
-        then
-
-          echo "ERROR: flutter.jar not found:"
-          echo "$JAR"
+          zip -r \
+            "$ZIP" \
+            "${{ matrix.artifact_dir }}"
 
 
           echo ""
+          echo "Package:"
+          ls -lh "$ZIP"
 
 
-          echo "Searching:"
+      #
+      # Upload the ZIP as an Actions artifact.
+      #
+      # The release job downloads these exact files.
+      #
 
+      - name: Upload build artifact
 
-          find "$OUT_DIR" \
-            -type f \
-            -name flutter.jar \
-            -print
+        uses: actions/upload-artifact@v4
 
+        with:
 
-          exit 1
+          name: flutter-engine-${{ matrix.arch }}-release
 
-        fi
+          path: |
+            flutter-engine/src/artifact/flutter-engine-${{ matrix.arch }}-release.zip
 
+          if-no-files-found: error
 
-        echo "JAR=$JAR" >> "$GITHUB_OUTPUT"
+          retention-days: 7
 
 
-        ls -lh "$JAR"
 
-
-    - name: Assemble standard Flutter artifact
-
-      run: |
-
-        cd flutter-engine/src
-
-
-        ARTIFACT="android-${{ matrix.artifact_cpu }}-${{ matrix.mode }}"
-
-
-        SNAPSHOT="${{ steps.snapshot.outputs.SNAPSHOT }}"
-
-
-        JAR="${{ steps.jar.outputs.JAR }}"
-
-
-        rm -rf artifact
-
-
-        mkdir -p \
-          "artifact/$ARTIFACT/linux-arm64"
-
-
-        cp \
-          "$JAR" \
-          "artifact/$ARTIFACT/flutter.jar"
-
-
-        cp \
-          "$SNAPSHOT" \
-          "artifact/$ARTIFACT/linux-arm64/gen_snapshot"
-
-
-        echo ""
-
-        echo "=============================="
-        echo "Artifact tree"
-        echo "=============================="
-
-
-        tree artifact
-
-
-    - name: Verify final artifact
-
-      run: |
-
-        cd flutter-engine/src
-
-
-        ARTIFACT="artifact/android-${{ matrix.artifact_cpu }}-${{ matrix.mode }}"
-
-
-        test -f \
-          "$ARTIFACT/flutter.jar"
-
-
-        test -f \
-          "$ARTIFACT/linux-arm64/gen_snapshot"
-
-
-        echo ""
-
-        echo "flutter.jar:"
-
-
-        ls -lh \
-          "$ARTIFACT/flutter.jar"
-
-
-        echo ""
-
-        echo "gen_snapshot:"
-
-
-        file \
-          "$ARTIFACT/linux-arm64/gen_snapshot"
-
-
-        if file \
-          "$ARTIFACT/linux-arm64/gen_snapshot" \
-          | grep -q "/system/bin/linker64"
-        then
-
-          echo "ERROR: gen_snapshot is Android ELF."
-
-          exit 1
-
-        fi
-
-
-        if ! file \
-          "$ARTIFACT/linux-arm64/gen_snapshot" \
-          | grep -q "ARM aarch64"
-        then
-
-          echo "ERROR: gen_snapshot is not ARM64."
-
-          exit 1
-
-        fi
-
-
-        if ! file \
-          "$ARTIFACT/linux-arm64/gen_snapshot" \
-          | grep -q "GNU/Linux"
-        then
-
-          echo "ERROR: gen_snapshot is not Linux."
-
-          exit 1
-
-        fi
-
-
-        echo ""
-
-        echo "Final artifact:"
-
-
-        tree "$ARTIFACT"
-
-
-    - name: Package
-
-      run: |
-
-        cd flutter-engine/src/artifact
-
-
-        ARTIFACT="android-${{ matrix.artifact_cpu }}-${{ matrix.mode }}"
-
-
-        ZIP="flutter-engine-android-${{ matrix.artifact_cpu }}-${{ matrix.mode }}.zip"
-
-
-        rm -f "$ZIP"
-
-
-        zip -q -r \
-          "$ZIP" \
-          "$ARTIFACT"
-
-
-        echo ""
-
-        echo "Package:"
-
-
-        ls -lh "$ZIP"
-
-
-        echo ""
-
-        echo "Package contents:"
-
-
-        unzip -l "$ZIP"
-
-
-    - name: Upload build artifact
-
-      uses: actions/upload-artifact@v4
-
-      with:
-
-        name: flutter-engine-android-${{ matrix.artifact_cpu }}-${{ matrix.mode }}
-
-        path: flutter-engine/src/artifact/flutter-engine-android-${{ matrix.artifact_cpu }}-${{ matrix.mode }}.zip
-
-        if-no-files-found: error
-
+  #
+  # Create GitHub Release after ALL three builds finish.
+  #
 
   release:
 
-    name: Create GitHub Release
+    name: Create Daily Release
 
     needs:
       - build-engine
@@ -529,126 +360,95 @@ jobs:
     steps:
 
 
-    - name: Download all build artifacts
+      - name: Download release artifacts
 
-      uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v4
 
-      with:
-        pattern: flutter-engine-android-*
-        path: release-assets
-        merge-multiple: true
-
-
-    - name: Verify downloaded assets
-
-      run: |
-
-        set -e
+        with:
+          pattern: flutter-engine-*-release
+          path: release-assets
+          merge-multiple: true
 
 
-        echo "Downloaded files:"
+      - name: Show release files
+
+        run: |
+
+          echo "Release files:"
+
+          find release-assets \
+            -type f \
+            -maxdepth 2 \
+            -print \
+            -exec ls -lh {} \;
 
 
-        find release-assets \
-          -maxdepth 2 \
-          -type f \
-          -print
+      - name: Generate release date
+
+        id: date
+
+        run: |
+
+          DATE="$(date -u +'%Y-%m-%d')"
+
+          TAG="${DATE}-daily-build"
+
+          echo "date=$DATE" >> "$GITHUB_OUTPUT"
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
 
-        echo ""
+      - name: Verify all three packages
+
+        run: |
+
+          test -f \
+            release-assets/flutter-engine-x64-release.zip
+
+          test -f \
+            release-assets/flutter-engine-arm64-release.zip
+
+          test -f \
+            release-assets/flutter-engine-arm-release.zip
 
 
-        COUNT=$(find release-assets \
-          -maxdepth 1 \
-          -type f \
-          -name '*.zip' \
-          | wc -l)
+          echo "All release packages exist."
 
 
-        echo "ZIP count: $COUNT"
+      - name: Create GitHub Release
 
+        uses: softprops/action-gh-release@v2
 
-        if [ "$COUNT" -ne 6 ]
-        then
+        with:
 
-          echo "ERROR: Expected exactly 6 ZIP files."
+          tag_name: ${{ steps.date.outputs.tag }}
 
-          exit 1
+          name: ${{ steps.date.outputs.tag }}
 
-        fi
+          body: |
+            Flutter Engine daily build
 
+            Date: ${{ steps.date.outputs.date }}
 
-        echo ""
+            Android release targets:
 
+            - Android x64
+            - Android ARM64
+            - Android ARM
 
-        for FILE in release-assets/*.zip
-        do
+            Host:
 
-          echo "Checking:"
-          echo "$FILE"
+            - Linux ARM64
 
-          unzip -t "$FILE"
+            Each package contains the corresponding Flutter Android
+            `flutter.jar` and the Linux ARM64 `gen_snapshot`
+            under Flutter's expected artifact directory layout.
 
-          echo ""
+          files: |
+            release-assets/flutter-engine-x64-release.zip
+            release-assets/flutter-engine-arm64-release.zip
+            release-assets/flutter-engine-arm-release.zip
 
-        done
+          fail_on_unmatched_files: true
 
-
-    - name: Get release date
-
-      id: date
-
-      run: |
-
-        echo "date=$(date -u +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
-
-
-    - name: Create GitHub Release
-
-      uses: softprops/action-gh-release@v2
-
-      with:
-
-        tag_name: flutter-engine-android-arm64-host-${{ steps.date.outputs.date }}
-
-        name: Flutter Engine Android ARM64 Host ${{ steps.date.outputs.date }}
-
-        body: |
-          Flutter Engine Android artifacts with Linux ARM64 host `gen_snapshot`.
-
-          Build matrix:
-
-          - android-arm-release
-          - android-arm-profile
-          - android-arm64-release
-          - android-arm64-profile
-          - android-x64-release
-          - android-x64-profile
-
-          Host:
-
-          - Linux ARM64
-
-          Target:
-
-          - Android ARM
-          - Android ARM64
-          - Android x64
-
-          Artifact layout:
-
-          ```text
-          android-<target>-<mode>/
-          ├── flutter.jar
-          └── linux-arm64/
-              └── gen_snapshot
-          ```
-
-        files: |
-          release-assets/*.zip
-
-        draft: false
-
-        prerelease: false
-
-        fail_on_unmatched_files: true
+          make_latest: true
