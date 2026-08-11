@@ -1,116 +1,152 @@
-name: Daily Engine Build (Linux arm64)
+name: Flutter Engine ARM64 Android
 
 on:
-  schedule:
-    - cron: '0 0 * * *'
   workflow_dispatch:
-
-env:
-  ENGINE_SRC: ${{ github.workspace }}/flutter-engine/src
+  push:
+    branches:
+      - main
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 600
+  build-engine-arm64-android:
 
-    strategy:
-      matrix:
-        mode: [release, profile]
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@v4
-        with:
-          root-reserve-mb: 512
-          swap-size-mb: 1024
-          remove-dotnet: 'true'
-          remove-haskell: 'true'
-          remove-android: 'true'
 
-      - name: Checkout
-        uses: actions/checkout@v4
+    - name: Maximize build space
+      uses: easimon/maximize-build-space@v4
+      with:
+        root-reserve-mb: 512
+        swap-size-mb: 2048
+        remove-dotnet: true
+        remove-haskell: true
+        remove-android: true
 
-      - name: Install cross-compiler
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            g++-aarch64-linux-gnu \
-            g++-arm-linux-gnueabihf \
-            zip
 
-      - name: Install depot_tools
-        run: |
-          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
-          echo "${{ github.workspace }}/depot_tools" >> $GITHUB_PATH
+    - name: Checkout
+      uses: actions/checkout@v4
 
-      - name: Cache gclient sync
-        uses: actions/cache@v4
-        with:
-          path: |
-            flutter-engine/src
-            flutter-engine/.cipd
-          key: flutter-engine-${{ runner.os }}-${{ hashFiles('flutter-engine/.gclient') }}
-          restore-keys: |
-            flutter-engine-${{ runner.os }}-
 
-      - name: Create .gclient
-        working-directory: ${{ github.workspace }}
-        run: |
-          mkdir -p flutter-engine
-          cat > flutter-engine/.gclient << 'EOF'
-          solutions = [
-            {
-              "managed": False,
-              "name": "src/flutter",
-              "url": "https://github.com/flutter/engine.git",
-              "custom_deps": {},
-              "deps_file": "DEPS",
-              "safesync_url": "",
-            },
-          ]
-          EOF
+    - name: Install dependencies
+      run: |
+        sudo apt update
 
-      - name: Sync dependencies
-        working-directory: ${{ github.workspace }}/flutter-engine
-        run: |
-          gclient sync --no-history --shallow -j$(nproc)
-        timeout-minutes: 240
+        sudo apt install -y \
+          git \
+          curl \
+          unzip \
+          zip \
+          ninja-build \
+          clang \
+          cmake \
+          pkg-config \
+          python3 \
+          python-is-python3 \
+          g++-aarch64-linux-gnu \
+          gcc-aarch64-linux-gnu
 
-      - name: Build engine (${{ matrix.mode }})
-        working-directory: ${{ env.ENGINE_SRC }}
-        run: |
-          ./flutter/tools/gn \
-            --target-os android \
-            --android-cpu arm64 \
-            --linux-cpu arm64 \
-            --no-goma \
-            --runtime-mode ${{ matrix.mode }}
 
-          ninja -C out/android_${{ matrix.mode }}_arm64 \
-            gen_snapshot \
-            flutter.jar \
-            libflutter.so
-        timeout-minutes: 240
+    - name: Install depot_tools
+      run: |
 
-      - name: Package artifacts (as linux-x64)
-        run: |
-          MODE=${{ matrix.mode }}
-          OUT_DIR=${{ env.ENGINE_SRC }}/out/android_${MODE}_arm64
+        git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
 
-          PKG_DIR=${{ runner.temp }}/android-arm64-${MODE}/linux-x64
-          mkdir -p ${PKG_DIR}
+        echo "$PWD/depot_tools" >> $GITHUB_PATH
 
-          cp ${OUT_DIR}/gen_snapshot  ${PKG_DIR}/
-          cp ${OUT_DIR}/flutter.jar   ${PKG_DIR}/
-          cp ${OUT_DIR}/libflutter.so ${PKG_DIR}/
 
-          cd ${PKG_DIR}/../..
-          tar -czf ${{ runner.temp }}/engine-android-arm64-${MODE}-linux-x64.tar.gz \
-            android-arm64-${MODE}
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: engine-android-arm64-${{ matrix.mode }}-linux-x64
-          path: ${{ runner.temp }}/engine-android-arm64-${{ matrix.mode }}-linux-x64.tar.gz
-          retention-days: 30
+    - name: Fetch Flutter Engine
+
+      run: |
+
+        mkdir flutter-engine
+
+        cd flutter-engine
+
+        gclient config \
+          --name src/flutter \
+          https://github.com/flutter/engine.git
+
+        gclient sync
+
+
+
+    - name: Build Android ARM64 Release
+
+      run: |
+
+        cd flutter-engine/src
+
+
+        ./flutter/tools/gn \
+          --target-os android \
+          --android-cpu arm64 \
+          --runtime-mode release \
+          --no-goma
+
+
+        ninja \
+          -C out/android_release_arm64
+
+
+
+    - name: Build Android ARM64 Profile
+
+      run: |
+
+        cd flutter-engine/src
+
+
+        ./flutter/tools/gn \
+          --target-os android \
+          --android-cpu arm64 \
+          --runtime-mode profile \
+          --no-goma
+
+
+        ninja \
+          -C out/android_profile_arm64
+
+
+
+    - name: Package
+
+      run: |
+
+        cd flutter-engine/src/out
+
+
+        zip -q -r android_release_arm64.zip \
+          android_release_arm64
+
+
+        zip -q -r android_profile_arm64.zip \
+          android_profile_arm64
+
+
+
+    - name: Get date
+
+      id: date
+
+      run: |
+
+        echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+
+
+
+    - name: Release
+
+      uses: ncipollo/release-action@v1
+
+      with:
+
+        artifacts: |
+          flutter-engine/src/out/android_release_arm64.zip
+          flutter-engine/src/out/android_profile_arm64.zip
+
+        tag: Flutter-Engine-Android-ARM64-${{ steps.date.outputs.date }}
+
+        token: ${{ secrets.RELEASE_TOKEN }}
+
+        allowUpdates: true
