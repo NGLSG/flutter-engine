@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   # =========================================================
-  # Job 1: 拆分为多 Runner 矩阵构建，防止单机磁盘空间爆满
+  # Job 1: 多 Runner 矩阵，在 x64 编译 Linux-ARM64 宿主的 Artifacts
   # =========================================================
   build-engine:
     name: Build ${{ matrix.target }}
@@ -22,18 +22,23 @@ jobs:
           - target: android-arm
             os: android
             cpu: arm
+            out_prefix: android
           - target: android-arm64
             os: android
             cpu: arm64
+            out_prefix: android
           - target: android-x64
             os: android
             cpu: x64
+            out_prefix: android
           - target: linux-arm64
             os: linux
             cpu: arm64
+            out_prefix: linux
           - target: linux-x64
             os: linux
             cpu: x64
+            out_prefix: linux
 
     steps:
       - name: Maximize build space
@@ -50,7 +55,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             git ninja-build clang python3 python-is-python3 \
-            zip unzip tree file xz-utils
+            zip unzip tree file xz-utils curl \
+            g++-aarch64-linux-gnu gcc-aarch64-linux-gnu
 
       - name: Install depot_tools
         run: |
@@ -64,8 +70,7 @@ jobs:
           gclient config --name src/flutter https://github.com/flutter/engine.git
           gclient sync --no-history
 
-      # 编译当前矩阵指定的 Target (Profile + Release)
-      - name: Build Engine Target
+      - name: Build Engine Target & ARM64 Cross Gen_snapshot
         run: |
           cd flutter-engine/src
           EXPORT_DIR="export-${{ matrix.target }}"
@@ -79,40 +84,64 @@ jobs:
 
             rm -rf out
 
-            ./flutter/tools/gn \
-              --target-os ${{ matrix.os }} \
-              --${{ matrix.os }}-cpu ${{ matrix.cpu }} \
-              --runtime-mode $MODE \
-              --no-goma \
-              --no-enable-unittests
+            # 1. 编译 android 目标的 flutter.jar
+            if [ "${{ matrix.os }}" = "android" ]; then
+              ./flutter/tools/gn \
+                --target-os android \
+                --android-cpu ${{ matrix.cpu }} \
+                --runtime-mode $MODE \
+                --no-goma \
+                --no-enable-unittests
 
-            OUT=$(find out -name build.ninja -printf '%h\n' | tail -1)
-            test -f "$OUT/build.ninja"
+              OUT_JAR=$(find out -name build.ninja -printf '%h\n' | tail -1)
+              ninja -C "$OUT_JAR" flutter.jar -j20
 
-            # 编译核心工具与产物
-            ninja -C "$OUT" gen_snapshot flutter.jar dart create_sdk -j20
+              cp "$OUT_JAR/flutter.jar" "$EXPORT_DIR/${{ matrix.target }}-${MODE}/flutter.jar"
+            fi
+
+            # 2. 交叉编译给 Linux ARM64 宿主使用的 gen_snapshot
+            # 必须指定 target-os/android-cpu 与 host/linux-cpu 为 arm64
+            rm -rf out
+
+            if [ "${{ matrix.os }}" = "android" ]; then
+              ./flutter/tools/gn \
+                --target-os android \
+                --android-cpu ${{ matrix.cpu }} \
+                --linux-cpu arm64 \
+                --runtime-mode $MODE \
+                --no-goma \
+                --no-enable-unittests
+            else
+              ./flutter/tools/gn \
+                --target-os linux \
+                --linux-cpu arm64 \
+                --runtime-mode $MODE \
+                --no-goma \
+                --no-enable-unittests
+            fi
+
+            OUT_GEN=$(find out -name build.ninja -printf '%h\n' | tail -1)
+            ninja -C "$OUT_GEN" gen_snapshot -j20
 
             TARGET_ART_DIR="$EXPORT_DIR/${{ matrix.target }}-${MODE}/linux-arm64"
             mkdir -p "$TARGET_ART_DIR"
-
-            cp "$OUT/flutter.jar" "$EXPORT_DIR/${{ matrix.target }}-${MODE}/flutter.jar" || true
-            cp "$OUT/gen_snapshot" "$TARGET_ART_DIR/gen_snapshot"
-
-            # 如果是 linux-arm64，另外保存一份 Host 端的原生 Dart SDK
-            if [ "${{ matrix.target }}" = "linux-arm64" ] && [ -d "$OUT/dart-sdk" ]; then
-              echo "Extracting Linux ARM64 Native Dart SDK..."
-              rm -rf "$EXPORT_DIR/host-dart-sdk"
-              cp -a "$OUT/dart-sdk" "$EXPORT_DIR/host-dart-sdk"
-            fi
+            cp "$OUT_GEN/gen_snapshot" "$TARGET_ART_DIR/gen_snapshot"
           }
 
           build_mode profile
           build_mode release
 
-      - name: Verify Built Binaries
+      - name: Verify Built Executables (Must be Linux ARM64)
         run: |
           cd flutter-engine/src/export-${{ matrix.target }}
+          echo "Verifying generated gen_snapshot architecture:"
           find . -name gen_snapshot -exec file {} \;
+          
+          # 断言检查：必须是 ARM aarch64 且是 Linux 可执行文件
+          for snap in $(find . -name gen_snapshot); do
+            file "$snap" | grep "ARM aarch64" || (echo "ERROR: $snap is not ARM64!" && exit 1)
+            file "$snap" | grep "GNU/Linux" || (echo "ERROR: $snap is not Linux binary!" && exit 1)
+          done
 
       - name: Upload Single Target Artifact
         uses: actions/upload-artifact@v4
@@ -122,7 +151,7 @@ jobs:
           retention-days: 1
 
   # =========================================================
-  # Job 2: 汇总所有 Matrix 产物，组装 SDK 并发布 Release
+  # Job 2: 组装开箱即用的 Linux ARM64 Flutter SDK
   # =========================================================
   assemble-and-package:
     name: Assemble SDK & Create Release
@@ -130,15 +159,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tree file xz-utils curl unzip
+
       - name: Download All Build Artifacts
         uses: actions/download-artifact@v4
         with:
           path: fetched-artifacts
-
-      - name: Inspect Fetched Artifacts
-        run: |
-          echo "Downloaded matrix artifacts:"
-          tree fetched-artifacts -L 3
 
       - name: Clone Clean Flutter SDK
         run: |
@@ -150,44 +179,47 @@ jobs:
           rm -rf "$ENGINE_CACHE_DIR"
           mkdir -p "$ENGINE_CACHE_DIR"
 
-          # 1. 复制各个架构编译出来的 export 碎片
+          # 1. 复制所有组装好的 Engine Artifacts
           find fetched-artifacts -mindepth 2 -maxdepth 2 -type d | while read dir; do
             dirname=$(basename "$dir")
-            if [ "$dirname" != "host-dart-sdk" ]; then
-              echo "Injecting engine artifact: $dirname"
-              cp -a "$dir" "$ENGINE_CACHE_DIR/"
-            fi
+            echo "Injecting engine artifact: $dirname"
+            cp -a "$dir" "$ENGINE_CACHE_DIR/"
           done
 
-          # 2. 注入 Linux ARM64 原生 Dart SDK
-          HOST_DART_DIR=$(find fetched-artifacts -type d -name "host-dart-sdk" | head -n 1)
-          if [ -n "$HOST_DART_DIR" ] && [ -d "$HOST_DART_DIR" ]; then
-            echo "Replacing Dart SDK with Native Linux ARM64 Dart SDK..."
+          # 2. 从官方拉取适配当前 Commit 的原生态 Linux ARM64 Dart SDK
+          ENGINE_COMMIT=$(cat flutter-sdk/bin/internal/engine.version)
+          echo "Engine Version: $ENGINE_COMMIT"
+
+          DART_SDK_URL="https://storage.googleapis.com/flutter_infra_release/flutter/${ENGINE_COMMIT}/dart-sdk-linux-arm64.zip"
+          echo "Fetching Native Linux ARM64 Dart SDK from: $DART_SDK_URL"
+
+          curl -sSL "$DART_SDK_URL" -o dart-sdk-arm64.zip
+          
+          if [ -f "dart-sdk-arm64.zip" ]; then
             rm -rf flutter-sdk/bin/cache/dart-sdk
-            cp -a "$HOST_DART_DIR" flutter-sdk/bin/cache/dart-sdk
+            unzip -q dart-sdk-arm64.zip -d flutter-sdk/bin/cache/
+            rm dart-sdk-arm64.zip
+            echo "Native ARM64 Dart SDK injected successfully."
           else
-            echo "ERROR: Linux ARM64 host-dart-sdk missing from matrix builds!"
+            echo "ERROR: Failed to download ARM64 Dart SDK"
             exit 1
           fi
 
-          # 3. 写入 engine.stamp 防清空/下载锁
-          ENGINE_COMMIT=$(cat flutter-sdk/bin/internal/engine.version)
+          # 3. 写入 engine.stamp 防清空/锁标记
           echo "$ENGINE_COMMIT" > flutter-sdk/bin/cache/engine.stamp
 
-      - name: Verify Final Architecture Compatibility
+      - name: Final Integrity & Architecture Verification
         run: |
           DART_BIN="flutter-sdk/bin/cache/dart-sdk/bin/dart"
           GEN_SNAPSHOT="flutter-sdk/bin/cache/artifacts/engine/android-arm64-release/linux-arm64/gen_snapshot"
 
-          echo "Checking Dart Binary Architecture:"
-          file "$DART_BIN"
+          echo "Checking Host Dart Binary Architecture:"
           file "$DART_BIN" | grep "ARM aarch64" || (echo "ERROR: Dart Binary is NOT Linux ARM64!" && exit 1)
 
-          echo "Checking gen_snapshot Architecture:"
-          file "$GEN_SNAPSHOT"
+          echo "Checking Cross gen_snapshot Architecture:"
           file "$GEN_SNAPSHOT" | grep "ARM aarch64" || (echo "ERROR: gen_snapshot is NOT Linux ARM64!" && exit 1)
 
-          echo "Architecture check PASSED."
+          echo "ALL CHECKS PASSED. SDK ready for Linux ARM64."
 
       - name: Compress SDK Package
         run: |
@@ -208,9 +240,9 @@ jobs:
           tag_name: ${{ steps.date.outputs.tag }}
           name: Flutter SDK (Linux ARM64 Out-of-the-Box) - ${{ steps.date.outputs.date }}
           body: |
-            Out-of-the-box ready-to-use Flutter SDK for Linux ARM64 devices.
+            Out-of-the-box ready-to-use Flutter SDK for Linux ARM64 host devices.
 
-            - **Host Binary Architecture**: ARM64 (`dart`, `gen_snapshot`)
+            - **Host Architecture**: Linux ARM64 (`dart`, `gen_snapshot`)
             - **Target Architectures**: Android (`arm`, `arm64`, `x64`), Linux (`arm64`, `x64`)
             - **Modes**: Profile & Release
             - **Auto-Update Protection**: Lock stamp applied (`engine.stamp`).
