@@ -1,11 +1,11 @@
-name: Flutter gen_snapshot ARM64
+name: Flutter Engine gen_snapshot ARM64
 
 on:
   workflow_dispatch:
 
 jobs:
 
-  build:
+  build-gen-snapshot:
 
     strategy:
       fail-fast: false
@@ -20,8 +20,11 @@ jobs:
 
     steps:
 
-    - name: Free space
+
+    - name: Maximize build space
+
       uses: easimon/maximize-build-space@v4
+
       with:
         root-reserve-mb: 256
         swap-size-mb: 4096
@@ -30,10 +33,9 @@ jobs:
         remove-android: true
 
 
-    - uses: actions/checkout@v4
 
+    - name: Install dependencies
 
-    - name: Dependencies
       run: |
 
         sudo apt update
@@ -45,22 +47,25 @@ jobs:
           python3 \
           python-is-python3 \
           zip \
-          g++-aarch64-linux-gnu
+          unzip \
+          g++-aarch64-linux-gnu \
+          gcc-aarch64-linux-gnu
 
 
 
-    - name: depot_tools
+    - name: Install depot_tools
 
       run: |
 
         git clone --depth=1 \
-        https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          https://chromium.googlesource.com/chromium/tools/depot_tools.git
+
 
         echo "$PWD/depot_tools" >> $GITHUB_PATH
 
 
 
-    - name: Fetch engine
+    - name: Fetch Flutter Engine
 
       run: |
 
@@ -70,17 +75,17 @@ jobs:
 
 
         gclient config \
-        --name src/flutter \
-        https://github.com/flutter/engine.git
+          --name src/flutter \
+          https://github.com/flutter/engine.git
 
 
         gclient sync \
-        --no-history \
-        --shallow
+          --no-history \
+          --shallow
 
 
 
-    - name: GN
+    - name: Configure GN
 
       run: |
 
@@ -93,49 +98,84 @@ jobs:
           --linux-cpu arm64 \
           --runtime-mode ${{ matrix.mode }} \
           --no-goma \
-          --disable-unittests
+          --no-enable-unittests \
+          --no-build-canvaskit \
+          --no-full-dart-sdk \
+          --build-engine-artifacts
 
 
 
-    - name: Build gen_snapshot only
+    - name: Build only gen_snapshot
 
       run: |
 
         cd flutter-engine/src
 
 
+        echo "Find output directory"
+
+
+        OUT_DIR=$(find out \
+          -maxdepth 1 \
+          -type d \
+          -name "android_*" \
+          | head -1)
+
+
+        echo "OUT_DIR=$OUT_DIR"
+
+
         ninja \
-          -C out/android_${{ matrix.mode }}_arm64 \
+          -C "$OUT_DIR" \
           gen_snapshot
 
 
 
-    - name: Package
+    - name: Locate gen_snapshot
 
       run: |
 
-        mkdir output
+        cd flutter-engine/src
 
 
-        cp \
-        flutter-engine/src/out/android_${{ matrix.mode }}_arm64/gen_snapshot \
-        output/
+        find out \
+          -name gen_snapshot \
+          -type f \
+          -exec ls -lh {} \;
+
+
+
+    - name: Package artifact
+
+      run: |
+
+        mkdir artifact
+
+
+        cp $(find flutter-engine/src/out \
+          -name gen_snapshot \
+          -type f \
+          | head -1) \
+          artifact/gen_snapshot
+
+
+        cd artifact
 
 
         zip \
-        gen_snapshot_android_arm64_${{ matrix.mode }}_linux_arm64.zip \
-        output/gen_snapshot
+          ../gen_snapshot_android-arm64_linux-arm64_${{ matrix.mode }}.zip \
+          gen_snapshot
 
 
 
-    - name: Upload
+    - name: Upload artifact
 
       uses: actions/upload-artifact@v4
 
       with:
 
         name:
-          gen_snapshot-${{ matrix.mode }}
+          gen_snapshot-android-arm64-linux-arm64-${{ matrix.mode }}
 
         path:
-          gen_snapshot_android_arm64_${{ matrix.mode }}_linux_arm64.zip
+          gen_snapshot_android-arm64_linux-arm64_${{ matrix.mode }}.zip
