@@ -1,11 +1,12 @@
-name: Flutter Engine gen_snapshot ARM64
+name: Flutter Engine gen_snapshot Android ARM64
 
 on:
   workflow_dispatch:
 
+
 jobs:
 
-  build-gen-snapshot:
+  build:
 
     strategy:
       fail-fast: false
@@ -26,7 +27,7 @@ jobs:
       uses: easimon/maximize-build-space@v4
 
       with:
-        root-reserve-mb: 256
+        root-reserve-mb: 512
         swap-size-mb: 4096
         remove-dotnet: true
         remove-haskell: true
@@ -48,8 +49,8 @@ jobs:
           python-is-python3 \
           zip \
           unzip \
-          g++-aarch64-linux-gnu \
-          gcc-aarch64-linux-gnu
+          gcc-aarch64-linux-gnu \
+          g++-aarch64-linux-gnu
 
 
 
@@ -65,7 +66,7 @@ jobs:
 
 
 
-    - name: Fetch Flutter Engine
+    - name: Fetch Flutter engine
 
       run: |
 
@@ -99,39 +100,42 @@ jobs:
           --runtime-mode ${{ matrix.mode }} \
           --no-goma \
           --no-enable-unittests \
-          --no-build-canvaskit \
-          --no-full-dart-sdk \
           --build-engine-artifacts
 
 
 
-    - name: Build only gen_snapshot
+    - name: Show output
+
+      run: |
+
+        cd flutter-engine/src
+
+        find out -maxdepth 3 -name build.ninja
+
+
+
+    - name: Build gen_snapshot only
 
       run: |
 
         cd flutter-engine/src
 
 
-        echo "Find output directory"
+        OUT_DIR=$(dirname $(find out \
+          -name build.ninja \
+          | head -1))
 
 
-        OUT_DIR=$(find out \
-          -maxdepth 1 \
-          -type d \
-          -name "android_*" \
-          | head -1)
-
-
-        echo "OUT_DIR=$OUT_DIR"
+        echo "Building: ${OUT_DIR}"
 
 
         ninja \
-          -C "$OUT_DIR" \
+          -C "${OUT_DIR}" \
           gen_snapshot
 
 
 
-    - name: Locate gen_snapshot
+    - name: Locate artifact
 
       run: |
 
@@ -139,36 +143,37 @@ jobs:
 
 
         find out \
-          -name gen_snapshot \
           -type f \
-          -exec ls -lh {} \;
+          -name gen_snapshot \
+          -exec file {} \;
 
 
 
-    - name: Package artifact
+    - name: Package
 
       run: |
 
         mkdir artifact
 
 
-        cp $(find flutter-engine/src/out \
-          -name gen_snapshot \
+        cp \
+        $(find flutter-engine/src/out \
           -type f \
+          -name gen_snapshot \
           | head -1) \
-          artifact/gen_snapshot
+        artifact/gen_snapshot
 
 
         cd artifact
 
 
         zip \
-          ../gen_snapshot_android-arm64_linux-arm64_${{ matrix.mode }}.zip \
+          ../gen_snapshot_android_arm64_linux_arm64_${{ matrix.mode }}.zip \
           gen_snapshot
 
 
 
-    - name: Upload artifact
+    - name: Upload
 
       uses: actions/upload-artifact@v4
 
@@ -178,4 +183,4 @@ jobs:
           gen_snapshot-android-arm64-linux-arm64-${{ matrix.mode }}
 
         path:
-          gen_snapshot_android-arm64_linux-arm64_${{ matrix.mode }}.zip
+          gen_snapshot_android_arm64_linux_arm64_${{ matrix.mode }}.zip
