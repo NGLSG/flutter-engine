@@ -6,7 +6,7 @@ on:
 
 jobs:
 
-  build-engine-artifact:
+  build-engine:
 
     strategy:
       fail-fast: false
@@ -88,7 +88,7 @@ jobs:
 
 
 
-    - name: Configure GN
+    - name: GN configure
 
       run: |
 
@@ -106,19 +106,7 @@ jobs:
 
 
 
-    - name: Locate build directory
-
-      run: |
-
-        cd flutter-engine/src
-
-
-        find out \
-          -name build.ninja
-
-
-
-    - name: Build engine artifact targets
+    - name: Build targets
 
       run: |
 
@@ -140,7 +128,7 @@ jobs:
 
 
 
-    - name: Export Flutter artifact tree
+    - name: Export artifact
 
       run: |
 
@@ -152,66 +140,44 @@ jobs:
           | head -1))
 
 
-        ARTIFACT=artifact/android-arm64-${{ matrix.mode }}
+        ROOT=artifact/android-arm64-${{ matrix.mode }}
 
 
         mkdir -p \
-          ${ARTIFACT}/linux-x64
+          ${ROOT}/linux-x64
 
 
 
-        #
-        # flutter.jar
-        #
+        echo "Copy flutter.jar"
+
 
         cp \
         $(find "${OUT_DIR}" \
           -name flutter.jar \
           | head -1) \
-        ${ARTIFACT}/flutter.jar
+        ${ROOT}/flutter.jar
 
 
 
-        #
-        # gen_snapshot
-        #
+        echo "Copy gen_snapshot"
+
 
         cp \
         $(find "${OUT_DIR}" \
           -type f \
           -name gen_snapshot \
           | head -1) \
-        ${ARTIFACT}/linux-x64/gen_snapshot
+        ${ROOT}/linux-x64/gen_snapshot
 
 
 
-        #
-        # flutter.jar license
-        #
-
-        find "${OUT_DIR}" \
-          -name "license.flutter_jar_zip.md" \
-          -exec cp {} ${ARTIFACT}/ \;
-
-
-
-        #
-        # gen_snapshot license
-        #
-
-        find "${OUT_DIR}" \
-          -name "license.archive_linux_gen_snapshot.md" \
-          -exec cp {} ${ARTIFACT}/linux-x64/ \;
-
-
-
-        echo "Final artifact:"
+        echo "Result:"
 
         tree artifact
 
 
 
-    - name: Verify architecture
+    - name: Verify binary
 
       run: |
 
@@ -228,12 +194,17 @@ jobs:
 
 
         zip -r \
-        ../../flutter_engine_android_arm64_${{ matrix.mode }}.zip \
-        android-arm64-${{ matrix.mode }}
+          flutter_engine_android_arm64_${{ matrix.mode }}.zip \
+          android-arm64-${{ matrix.mode }}
 
 
 
-    - name: Upload
+        ls -lh \
+          flutter_engine_android_arm64_${{ matrix.mode }}.zip
+
+
+
+    - name: Upload artifact
 
       uses: actions/upload-artifact@v4
 
@@ -243,4 +214,5 @@ jobs:
           flutter-engine-android-arm64-${{ matrix.mode }}
 
         path:
-          flutter_engine_android_arm64_${{ matrix.mode }}.zip
+
+          flutter-engine/src/artifact/flutter_engine_android_arm64_${{ matrix.mode }}.zip
