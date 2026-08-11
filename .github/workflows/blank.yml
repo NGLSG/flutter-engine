@@ -22,23 +22,18 @@ jobs:
           - target: android-arm
             os: android
             cpu: arm
-            out_prefix: android
           - target: android-arm64
             os: android
             cpu: arm64
-            out_prefix: android
           - target: android-x64
             os: android
             cpu: x64
-            out_prefix: android
           - target: linux-arm64
             os: linux
             cpu: arm64
-            out_prefix: linux
           - target: linux-x64
             os: linux
             cpu: x64
-            out_prefix: linux
 
     steps:
       - name: Maximize build space
@@ -82,10 +77,14 @@ jobs:
             echo "Building ${{ matrix.target }} - $MODE"
             echo "=========================================="
 
-            rm -rf out
+            TARGET_ROOT="$EXPORT_DIR/${{ matrix.target }}-${MODE}"
+            TARGET_ART_DIR="$TARGET_ROOT/linux-arm64"
+            mkdir -p "$TARGET_ART_DIR"
 
             # 1. 编译 android 目标的 flutter.jar
             if [ "${{ matrix.os }}" = "android" ]; then
+              rm -rf out
+
               ./flutter/tools/gn \
                 --target-os android \
                 --android-cpu ${{ matrix.cpu }} \
@@ -96,11 +95,12 @@ jobs:
               OUT_JAR=$(find out -name build.ninja -printf '%h\n' | tail -1)
               ninja -C "$OUT_JAR" flutter.jar -j20
 
-              cp "$OUT_JAR/flutter.jar" "$EXPORT_DIR/${{ matrix.target }}-${MODE}/flutter.jar"
+              if [ -f "$OUT_JAR/flutter.jar" ]; then
+                cp "$OUT_JAR/flutter.jar" "$TARGET_ROOT/flutter.jar"
+              fi
             fi
 
             # 2. 交叉编译给 Linux ARM64 宿主使用的 gen_snapshot
-            # 必须指定 target-os/android-cpu 与 host/linux-cpu 为 arm64
             rm -rf out
 
             if [ "${{ matrix.os }}" = "android" ]; then
@@ -123,9 +123,9 @@ jobs:
             OUT_GEN=$(find out -name build.ninja -printf '%h\n' | tail -1)
             ninja -C "$OUT_GEN" gen_snapshot -j20
 
-            TARGET_ART_DIR="$EXPORT_DIR/${{ matrix.target }}-${MODE}/linux-arm64"
-            mkdir -p "$TARGET_ART_DIR"
-            cp "$OUT_GEN/gen_snapshot" "$TARGET_ART_DIR/gen_snapshot"
+            if [ -f "$OUT_GEN/gen_snapshot" ]; then
+              cp "$OUT_GEN/gen_snapshot" "$TARGET_ART_DIR/gen_snapshot"
+            fi
           }
 
           build_mode profile
@@ -137,7 +137,6 @@ jobs:
           echo "Verifying generated gen_snapshot architecture:"
           find . -name gen_snapshot -exec file {} \;
           
-          # 断言检查：必须是 ARM aarch64 且是 Linux 可执行文件
           for snap in $(find . -name gen_snapshot); do
             file "$snap" | grep "ARM aarch64" || (echo "ERROR: $snap is not ARM64!" && exit 1)
             file "$snap" | grep "GNU/Linux" || (echo "ERROR: $snap is not Linux binary!" && exit 1)
