@@ -58,7 +58,7 @@ jobs:
           git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
           echo "$PWD/depot_tools" >> "$GITHUB_PATH"
 
-      # 精确获取 Flutter Stable 分支所对应的 Engine Commit
+      # 精确获取 Flutter Stable 分支所对应的 Engine Commit 并 Checkout 节点
       - name: Fetch Matching Engine Version
         run: |
           git clone --depth 1 -b stable https://github.com/flutter/flutter.git temp-flutter
@@ -68,8 +68,20 @@ jobs:
 
           mkdir flutter-engine
           cd flutter-engine
-          gclient config --name src/flutter https://github.com/flutter/engine.git@${ENGINE_COMMIT}
-          gclient sync --no-history
+
+          # 1. 初始化 gclient 配置
+          gclient config --name src/flutter https://github.com/flutter/engine.git
+
+          # 2. 先做全量同步（避免浅克隆导致特定 commit 无法 fetch 的 128 错误）
+          gclient sync
+
+          # 3. 切换到精确匹配的 Engine Commit 节点
+          cd src/flutter
+          git checkout $ENGINE_COMMIT
+          cd ../..
+
+          # 4. 再次同步对应的第三方依赖
+          gclient sync
 
       - name: Build Engine Artifacts
         run: |
@@ -179,7 +191,7 @@ jobs:
           # 3. 写入 engine.stamp 锁定标记
           echo "$ENGINE_COMMIT" > flutter-sdk/bin/cache/engine.stamp
 
-          # 4. 【关键修复】统一递归赋予可执行权限 (+x)
+          # 4. 统一递归赋予可执行权限 (+x)
           echo "Granting execution permissions (+x) to all host binaries..."
           chmod +x flutter-sdk/bin/flutter
           chmod +x flutter-sdk/bin/cache/dart-sdk/bin/*
