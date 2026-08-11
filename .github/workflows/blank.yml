@@ -1,4 +1,4 @@
-name: Flutter Engine gen_snapshot Android ARM64
+name: Flutter Engine Android ARM64 Artifact
 
 on:
   workflow_dispatch:
@@ -6,10 +6,11 @@ on:
 
 jobs:
 
-  build:
+  build-engine-artifact:
 
     strategy:
       fail-fast: false
+
       matrix:
         mode:
           - release
@@ -49,6 +50,7 @@ jobs:
           python-is-python3 \
           zip \
           unzip \
+          tree \
           gcc-aarch64-linux-gnu \
           g++-aarch64-linux-gnu
 
@@ -104,17 +106,19 @@ jobs:
 
 
 
-    - name: Show output
+    - name: Locate build directory
 
       run: |
 
         cd flutter-engine/src
 
-        find out -maxdepth 3 -name build.ninja
+
+        find out \
+          -name build.ninja
 
 
 
-    - name: Build gen_snapshot only
+    - name: Build engine artifact targets
 
       run: |
 
@@ -126,26 +130,93 @@ jobs:
           | head -1))
 
 
-        echo "Building: ${OUT_DIR}"
+        echo "OUT_DIR=${OUT_DIR}"
 
 
         ninja \
           -C "${OUT_DIR}" \
-          gen_snapshot
+          gen_snapshot \
+          flutter.jar
 
 
 
-    - name: Locate artifact
+    - name: Export Flutter artifact tree
 
       run: |
 
         cd flutter-engine/src
 
 
-        find out \
+        OUT_DIR=$(dirname $(find out \
+          -name build.ninja \
+          | head -1))
+
+
+        ARTIFACT=artifact/android-arm64-${{ matrix.mode }}
+
+
+        mkdir -p \
+          ${ARTIFACT}/linux-x64
+
+
+
+        #
+        # flutter.jar
+        #
+
+        cp \
+        $(find "${OUT_DIR}" \
+          -name flutter.jar \
+          | head -1) \
+        ${ARTIFACT}/flutter.jar
+
+
+
+        #
+        # gen_snapshot
+        #
+
+        cp \
+        $(find "${OUT_DIR}" \
           -type f \
           -name gen_snapshot \
-          -exec file {} \;
+          | head -1) \
+        ${ARTIFACT}/linux-x64/gen_snapshot
+
+
+
+        #
+        # flutter.jar license
+        #
+
+        find "${OUT_DIR}" \
+          -name "license.flutter_jar_zip.md" \
+          -exec cp {} ${ARTIFACT}/ \;
+
+
+
+        #
+        # gen_snapshot license
+        #
+
+        find "${OUT_DIR}" \
+          -name "license.archive_linux_gen_snapshot.md" \
+          -exec cp {} ${ARTIFACT}/linux-x64/ \;
+
+
+
+        echo "Final artifact:"
+
+        tree artifact
+
+
+
+    - name: Verify architecture
+
+      run: |
+
+        file \
+        flutter-engine/src/artifact/android-arm64-${{ matrix.mode }}/linux-x64/gen_snapshot
 
 
 
@@ -153,23 +224,12 @@ jobs:
 
       run: |
 
-        mkdir artifact
+        cd flutter-engine/src/artifact
 
 
-        cp \
-        $(find flutter-engine/src/out \
-          -type f \
-          -name gen_snapshot \
-          | head -1) \
-        artifact/gen_snapshot
-
-
-        cd artifact
-
-
-        zip \
-          ../gen_snapshot_android_arm64_linux_arm64_${{ matrix.mode }}.zip \
-          gen_snapshot
+        zip -r \
+        ../../flutter_engine_android_arm64_${{ matrix.mode }}.zip \
+        android-arm64-${{ matrix.mode }}
 
 
 
@@ -180,7 +240,7 @@ jobs:
       with:
 
         name:
-          gen_snapshot-android-arm64-linux-arm64-${{ matrix.mode }}
+          flutter-engine-android-arm64-${{ matrix.mode }}
 
         path:
-          gen_snapshot_android_arm64_linux_arm64_${{ matrix.mode }}.zip
+          flutter_engine_android_arm64_${{ matrix.mode }}.zip
