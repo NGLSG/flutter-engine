@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   # =========================================================
-  # Job 1: 矩阵构建 Engine 碎片（直接对齐 stable 分支，绝对解开 fetch 错误）
+  # Job 1: 矩阵构建 Engine 碎片（精确锁定与 SDK Stable 匹配的 Candidate 分支）
   # =========================================================
   build-engine:
     name: Build ${{ matrix.target }}
@@ -58,17 +58,30 @@ jobs:
           git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
           echo "$PWD/depot_tools" >> "$GITHUB_PATH"
 
-      # 避开 SHA 直接 fetch：直接让 Engine 挂载 Flutter SDK 的 stable 标签/分支
-      - name: Fetch Stable Flutter Engine
+      - name: Fetch Aligned Engine Version
         run: |
+          # 1. 先抓取稳定版 SDK 获取精确 Engine Commit
+          git clone --depth 1 -b stable https://github.com/flutter/flutter.git temp-sdk
+          ENGINE_COMMIT=$(cat temp-sdk/bin/internal/engine.version)
+          echo "Target Aligned Engine Commit: $ENGINE_COMMIT"
+          rm -rf temp-sdk
+
           mkdir flutter-engine
           cd flutter-engine
 
-          # 1. 挂载引擎仓库的 stable 分支（与即将打包的 SDK stable 分支 100% 对应）
-          gclient config --name src/flutter https://github.com/flutter/engine.git@refs/heads/stable
-          
-          # 2. 同步稳定版 Engine 及其全套依赖
-          gclient sync --no-history --shallow
+          # 2. 配置并拉取常规 Engine 框架
+          gclient config --name src/flutter https://github.com/flutter/engine.git
+          gclient sync --no-history --nohooks
+
+          # 3. 进入目录抓取分支列表（含候选 release 分支），检出精确 Commit
+          cd src/flutter
+          git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
+          git fetch origin --depth=100
+          git checkout "$ENGINE_COMMIT"
+          cd ../..
+
+          # 4. 同步该 Commit 对应的精确依赖库（保证 Kernel AST 对应）
+          gclient sync --no-history
 
       - name: Build Engine Artifacts
         run: |
