@@ -230,21 +230,63 @@ jobs:
       - name: Pull official Android flutter.jar artifacts
         run: |
           set -euo pipefail
-          export PATH="$PWD/flutter-sdk/bin:$PATH"
-          # android_internal_build downloads and extracts the official
-          # artifacts.zip files into:
-          #   android-arm{,-profile,-release}/flutter.jar
-          #   android-arm64{,-profile,-release}/flutter.jar
-          #   android-x64{,-profile,-release}/flutter.jar
-          # It also writes the matching engine-revision cache stamp.
-          #
-          # android_gen_snapshot retains the official linux-x64 directories
-          # expected by the current stable cache checker. The source-built
-          # linux-arm64 binaries are injected in the next step.
-          flutter precache \
-            --universal \
-            --android_internal_build \
-            --android_gen_snapshot
+          ENGINE="${{ needs.resolve.outputs.engine }}"
+          ENGINE_DIR="flutter-sdk/bin/cache/artifacts/engine"
+          CACHE_DIR="flutter-sdk/bin/cache"
+          STORAGE_BASE_URL="${FLUTTER_STORAGE_BASE_URL:-https://storage.googleapis.com}"
+          BASE_URL="${STORAGE_BASE_URL}/flutter_infra_release/flutter/${ENGINE}"
+          TMP="$(mktemp -d)"
+          trap 'rm -rf "$TMP"' EXIT
+
+          # On the actual linux-arm64 run, `flutter precache` completed after
+          # the universal set and did not populate these Android directories.
+          # Pull the target-side engine archives explicitly, without relying
+          # on host artifact selection or an existing cache stamp.
+          for DIR in \
+            android-x86 \
+            android-arm android-arm-profile android-arm-release \
+            android-arm64 android-arm64-profile android-arm64-release \
+            android-x64 android-x64-profile android-x64-release; do
+            echo "Downloading ${DIR}/artifacts.zip"
+            ARCHIVE="$TMP/${DIR}-artifacts.zip"
+            DEST="$ENGINE_DIR/$DIR"
+            curl --fail --location --retry 5 --retry-all-errors \
+              "$BASE_URL/$DIR/artifacts.zip" \
+              --output "$ARCHIVE"
+            rm -rf "$DEST"
+            mkdir -p "$DEST"
+            unzip -q "$ARCHIVE" -d "$DEST"
+            test -s "$DEST/flutter.jar" \
+              || { echo "FATAL: $DEST/flutter.jar missing"; exit 1; }
+            unzip -tqq "$DEST/flutter.jar"
+          done
+
+          # Current stable's cache validator still requires these six
+          # official linux-x64 directories even on a linux-arm64 host.
+          # They are retained only to keep the cache fully offline/up-to-date;
+          # the ARM64 host executes the linux-arm64 binaries injected below.
+          for DIR in \
+            android-arm-profile android-arm-release \
+            android-arm64-profile android-arm64-release \
+            android-x64-profile android-x64-release; do
+            echo "Downloading ${DIR}/linux-x64.zip"
+            ARCHIVE="$TMP/${DIR}-linux-x64.zip"
+            DEST="$ENGINE_DIR/$DIR/linux-x64"
+            curl --fail --location --retry 5 --retry-all-errors \
+              "$BASE_URL/$DIR/linux-x64.zip" \
+              --output "$ARCHIVE"
+            rm -rf "$DEST"
+            mkdir -p "$DEST"
+            unzip -q "$ARCHIVE" -d "$DEST"
+            test -s "$DEST/gen_snapshot" \
+              || { echo "FATAL: $DEST/gen_snapshot missing"; exit 1; }
+            chmod +x "$DEST/gen_snapshot"
+          done
+
+          # Match EngineCachedArtifact's two stamp names so later offline
+          # commands do not attempt to redownload these complete directories.
+          printf '%s' "$ENGINE" > "$CACHE_DIR/android-internal-build-artifacts.stamp"
+          printf '%s' "$ENGINE" > "$CACHE_DIR/android-sdk.stamp"
 
       - name: Inject arm64 Android gen_snapshots
         run: |
@@ -283,10 +325,13 @@ jobs:
             android-arm android-arm-profile android-arm-release \
             android-arm64 android-arm64-profile android-arm64-release \
             android-x64 android-x64-profile android-x64-release; do
-            test -s "$ENGINE_DIR/$dir/flutter.jar"
+            test -s "$ENGINE_DIR/$dir/flutter.jar" \
+              || { echo "FATAL: $ENGINE_DIR/$dir/flutter.jar missing"; exit 1; }
             unzip -tqq "$ENGINE_DIR/$dir/flutter.jar"
             sha256sum "$ENGINE_DIR/$dir/flutter.jar"
           done
+          test -s "flutter-sdk/bin/cache/android-internal-build-artifacts.stamp"
+          test -s "flutter-sdk/bin/cache/android-sdk.stamp"
 
           echo "--- android gen_snapshots (must all be ARM aarch64) ---"
           n=0
