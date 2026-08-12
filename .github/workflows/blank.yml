@@ -2,6 +2,12 @@ name: Flutter Engine Daily Build
 
 on:
   workflow_dispatch:
+    inputs:
+      flutter_version:
+        description: "要构建的 Flutter SDK 稳定版本 Tag (例如: 3.29.0, 3.27.0)"
+        required: true
+        default: "3.29.0"
+        type: string
   schedule:
     - cron: "00 16 * * *"
 
@@ -10,7 +16,7 @@ permissions:
 
 jobs:
   # =========================================================
-  # Job 1: 矩阵构建，按 Flutter Stable 精确 Commit 编译 Engine
+  # Job 1: 矩阵构建，按指定 Flutter 版本编译 Engine
   # =========================================================
   build-engine:
     name: Build ${{ matrix.target }}
@@ -58,30 +64,31 @@ jobs:
           git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
           echo "$PWD/depot_tools" >> "$GITHUB_PATH"
 
-      # 获取 Flutter Stable 分支对应的 Engine Commit，并绕过 upload-pack 限制
-      - name: Fetch Matching Engine Version
+      # 获取指定的 Flutter SDK 版本并拉取对应的 Engine 源码
+      - name: Fetch Target Flutter Engine
         run: |
-          git clone --depth 1 -b stable https://github.com/flutter/flutter.git temp-flutter
+          FLUTTER_VER="${{ github.event.inputs.flutter_version || '3.29.0' }}"
+          echo "Target Flutter Version Tag: $FLUTTER_VER"
+
+          # 1. 克隆指定 Tag 的 Flutter SDK
+          git clone --depth 1 -b "$FLUTTER_VER" https://github.com/flutter/flutter.git temp-flutter
           ENGINE_COMMIT=$(cat temp-flutter/bin/internal/engine.version)
-          echo "Matching Engine Commit: $ENGINE_COMMIT"
+          echo "Target Engine Commit: $ENGINE_COMMIT"
           rm -rf temp-flutter
 
           mkdir flutter-engine
           cd flutter-engine
 
-          # 1. 不在 gclient 层面绑定 commit SHA，避开 upload-pack 报错
+          # 2. 拉取稳定分支的主干 Engine，然后直接 checkout 到该 Commit
           gclient config --name src/flutter https://github.com/flutter/engine.git
-
-          # 2. 仅同步引擎 Git 仓库主干
           gclient sync --no-history --nohooks
 
-          # 3. 进目录抓取全量 Ref 并切换到指定 Commit
           cd src/flutter
-          git fetch origin "+refs/heads/*:refs/remotes/origin/*" "+refs/tags/*:refs/tags/*"
-          git checkout $ENGINE_COMMIT
+          git fetch origin "$ENGINE_COMMIT" --depth=1
+          git checkout "$ENGINE_COMMIT"
           cd ../..
 
-          # 4. 再次运行 gclient 补全当前 Commit 的第三方依赖与 Hooks
+          # 3. 补全依赖项
           gclient sync
 
       - name: Build Engine Artifacts
@@ -163,7 +170,8 @@ jobs:
 
       - name: Clone Clean Flutter SDK
         run: |
-          git clone --depth 1 -b stable https://github.com/flutter/flutter.git flutter-sdk
+          FLUTTER_VER="${{ github.event.inputs.flutter_version || '3.29.0' }}"
+          git clone --depth 1 -b "$FLUTTER_VER" https://github.com/flutter/flutter.git flutter-sdk
 
       - name: Assemble All Built Artifacts & Fix Permissions
         run: |
@@ -226,7 +234,8 @@ jobs:
         id: date
         run: |
           DATE="$(date -u +'%Y-%m-%d')"
-          TAG="${DATE}-daily-build"
+          FLUTTER_VER="${{ github.event.inputs.flutter_version || '3.29.0' }}"
+          TAG="v${FLUTTER_VER}-linux-arm64-${DATE}"
           echo "date=$DATE" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
@@ -236,11 +245,12 @@ jobs:
         run: |
           TAG="${{ steps.date.outputs.tag }}"
           DATE="${{ steps.date.outputs.date }}"
+          FLUTTER_VER="${{ github.event.inputs.flutter_version || '3.29.0' }}"
 
           gh release delete "$TAG" --yes --cleanup-tag || true
 
           gh release create "$TAG" \
             flutter-linux-arm64.tar.xz \
-            --title "Flutter SDK (Linux ARM64 Out-of-the-Box) - $DATE" \
-            --notes "Out-of-the-box ready-to-use Flutter SDK for Linux ARM64 host devices." \
+            --title "Flutter SDK $FLUTTER_VER (Linux ARM64 Out-of-the-Box)" \
+            --notes "Out-of-the-box ready-to-use Flutter SDK v$FLUTTER_VER for Linux ARM64 host devices. Build Date: $DATE" \
             --latest
