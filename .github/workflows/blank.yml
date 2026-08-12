@@ -562,84 +562,54 @@ jobs:
 
 
   release:
-
-
+    name: Create GitHub Release
     needs: assemble-sdk
-
-
     runs-on: ubuntu-latest
-
-
 
     steps:
 
-
-
-      - name: Download SDK
-
+      - name: Download SDK Artifact
         uses: actions/download-artifact@v4
-
         with:
-
           name: flutter-linux-arm64-full-sdk
 
-          path: release
-
-
-
-
-
-      - name: Verify
-
+      - name: Verify Package
         run: |
+          ls -lh
+          test -f flutter-linux-arm64.tar.xz
 
-          ls -lh release
-
-          test -f release/flutter-linux-arm64.tar.xz
-
-
-
-
-
-      - name: Release
-
-        env:
-
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-          GH_REPO: ${{ github.repository }}
-
-
+      - name: Generate Release Tag
+        id: date
         run: |
-
-          set -e
-
-
-
-          DATE=$(date -u +"%Y-%m-%d")
-
-
+          DATE="$(date -u +'%Y-%m-%d')"
           TAG="${DATE}-daily-build"
 
+          echo "date=$DATE" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release via GitHub CLI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+        run: |
+
+          TAG="${{ steps.date.outputs.tag }}"
+          DATE="${{ steps.date.outputs.date }}"
 
 
-          if gh release view "$TAG" --repo "$GH_REPO" >/dev/null 2>&1;
-
-          then
-
-            gh release delete "$TAG" \
-              --repo "$GH_REPO" \
-              --yes \
-              --cleanup-tag
-
-          fi
+          echo "Creating release:"
+          echo "$TAG"
 
 
+          gh release delete \
+            "$TAG" \
+            --yes \
+            --cleanup-tag || true
 
 
-          gh release create "$TAG" \
-            release/flutter-linux-arm64.tar.xz \
-            --repo "$GH_REPO" \
-            --title "Flutter Linux ARM64 SDK $DATE" \
-            --notes "Daily Flutter Engine build." \
+          gh release create \
+            "$TAG" \
+            flutter-linux-arm64.tar.xz \
+            --title "Flutter SDK (Linux ARM64 Out-of-the-Box) - $DATE" \
+            --notes "Daily Flutter Engine build. Out-of-the-box ready-to-use Flutter SDK for Linux ARM64 host devices." \
             --latest
