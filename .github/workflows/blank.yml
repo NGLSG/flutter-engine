@@ -129,7 +129,7 @@ jobs:
         cd flutter/engine/src
 
 
-        for MODE in profile release
+        for MODE in release # profile
         do
 
           echo "=============================="
