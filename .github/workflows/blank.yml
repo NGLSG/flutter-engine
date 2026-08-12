@@ -58,7 +58,7 @@ jobs:
           git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
           echo "$PWD/depot_tools" >> "$GITHUB_PATH"
 
-      # 获取 Flutter Stable 分支对应的 Engine Commit，并直接交给 gclient 一步到位
+      # 获取 Flutter Stable 分支对应的 Engine Commit，并绕过 upload-pack 限制
       - name: Fetch Matching Engine Version
         run: |
           git clone --depth 1 -b stable https://github.com/flutter/flutter.git temp-flutter
@@ -69,8 +69,19 @@ jobs:
           mkdir flutter-engine
           cd flutter-engine
 
-          # 让 gclient 全量配置并自动 checkout 到精准 commit
-          gclient config --name src/flutter "https://github.com/flutter/engine.git@${ENGINE_COMMIT}"
+          # 1. 不在 gclient 层面绑定 commit SHA，避开 upload-pack 报错
+          gclient config --name src/flutter https://github.com/flutter/engine.git
+
+          # 2. 仅同步引擎 Git 仓库主干
+          gclient sync --no-history --nohooks
+
+          # 3. 进目录抓取全量 Ref 并切换到指定 Commit
+          cd src/flutter
+          git fetch origin "+refs/heads/*:refs/remotes/origin/*" "+refs/tags/*:refs/tags/*"
+          git checkout $ENGINE_COMMIT
+          cd ../..
+
+          # 4. 再次运行 gclient 补全当前 Commit 的第三方依赖与 Hooks
           gclient sync
 
       - name: Build Engine Artifacts
