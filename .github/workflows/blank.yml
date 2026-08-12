@@ -1,16 +1,24 @@
-name: Flutter Engine Daily Build (Mono-Repo)
+name: Flutter Engine Daily Build
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "00 16 * * *"
+    - cron: "0 16 * * *"
 
 permissions:
   contents: write
 
+# 避免定时任务与手动任务同时删除/重建同一个 Release Tag。
+concurrency:
+  group: flutter-linux-arm64-daily-build
+  cancel-in-progress: false
+
 jobs:
   # =========================================================
-  # Job 1: 基于完整 Mono-Repo 矩阵编译 Engine 碎片
+  # Job 1: 为 ARM64 Linux 主机构建 Android Profile/Release 产物。
+  #
+  # 自 2024 年底起，Engine 源码已纳入 flutter/flutter 单仓库。
+  # 不能再从已归档的 flutter/engine 仓库按 engine.version 检出。
   # =========================================================
   build-engine:
     name: Build ${{ matrix.target }}
@@ -20,19 +28,10 @@ jobs:
       matrix:
         include:
           - target: android-arm
-            os: android
             cpu: arm
           - target: android-arm64
-            os: android
             cpu: arm64
           - target: android-x64
-            os: android
-            cpu: x64
-          - target: linux-arm64
-            os: linux
-            cpu: arm64
-          - target: linux-x64
-            os: linux
             cpu: x64
 
     steps:
@@ -50,87 +49,93 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             git ninja-build clang python3 python-is-python3 \
-            zip unzip tree file xz-utils curl \
+            zip unzip tree file xz-utils curl pkg-config \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-      # 1. 安装 depot_tools 并配置 vpython3
       - name: Install depot_tools
         run: |
-          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
-          echo "$PWD/depot_tools" >> $GITHUB_PATH
+          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          echo "$PWD/depot_tools" >> "$GITHUB_PATH"
 
-      # 2. 全量克隆 Mono-repo（取消 --depth 1，确保补全 Skia 等引擎依赖节点）
-      - name: Checkout Complete Flutter Mono-repo (Stable)
+      - name: Fetch stable Flutter source and aligned Engine dependencies
         run: |
-          git clone -b stable https://github.com/flutter/flutter.git flutter-mono
-          
-          # 补全依赖项
-          export PATH="$PWD/depot_tools:$PATH"
-          cd flutter-mono/engine/src
-          gclient sync
+          set -euxo pipefail
 
-      # 3. 编译 Engine 碎片
-      - name: Build Engine Artifacts
+          # stable 分支中包含与 bin/internal/engine.version 对齐的 Engine 源码。
+          git clone --depth=1 --branch stable https://github.com/flutter/flutter.git flutter-source
+          cd flutter-source
+
+          ENGINE_COMMIT="$(cat bin/internal/engine.version)"
+          echo "Target aligned Engine version: ${ENGINE_COMMIT}"
+          echo "Framework commit: $(git rev-parse HEAD)"
+
+          # 使用仓库随附的 gclient 配置；它会在 Flutter 根目录处理 Engine 依赖。
+          cp engine/scripts/standard.gclient .gclient
+          gclient sync --no-history --nohooks
+
+      - name: Build Android artifacts and Linux ARM64 snapshotter
         run: |
-          export PATH="$PWD/depot_tools:$PATH"
+          set -euxo pipefail
+          cd flutter-source/engine/src
 
-          cd flutter-mono/engine/src
-          EXPORT_DIR="export-${{ matrix.target }}"
+          EXPORT_DIR="$GITHUB_WORKSPACE/export-${{ matrix.target }}"
 
           build_mode() {
-            MODE=$1
-            echo "=========================================="
-            echo "Building ${{ matrix.target }} - $MODE"
-            echo "=========================================="
-
+            MODE="$1"
             ART_DIR="$EXPORT_DIR/${{ matrix.target }}-${MODE}"
+            ANDROID_OUT="out/ci/${{ matrix.target }}-${MODE}"
+            LINUX_OUT="out/ci/linux-arm64-${MODE}"
+
             mkdir -p "$ART_DIR/linux-arm64"
 
-            # A. Android 目标 -> 编 flutter.jar
-            if [ "${{ matrix.os }}" = "android" ]; then
-              rm -rf out
-              ./flutter/tools/gn \
-                --target-os android \
-                --android-cpu ${{ matrix.cpu }} \
-                --runtime-mode $MODE \
-                --no-goma \
-                --no-enable-unittests \
-                --build-engine-artifacts
-
-              OUT_ANDROID=$(find out -name build.ninja -printf '%h\n' | tail -1)
-              ninja -C "$OUT_ANDROID" flutter.jar -j20
-
-              cp "$OUT_ANDROID/flutter.jar" "$ART_DIR/flutter.jar"
-            fi
-
-            # B. Linux ARM64 宿主 -> 编 gen_snapshot
-            rm -rf out
+            # 生成与目标 Android ABI / runtime mode 匹配的 flutter.jar。
             ./flutter/tools/gn \
-              --target-os linux \
-              --linux-cpu arm64 \
-              --runtime-mode $MODE \
+              --target-dir "ci/${{ matrix.target }}-${MODE}" \
+              --target-os android \
+              --android-cpu "${{ matrix.cpu }}" \
+              --runtime-mode "$MODE" \
               --no-goma \
               --no-enable-unittests \
               --build-engine-artifacts
+            ninja -C "$ANDROID_OUT" flutter/shell/platform/android:embedding_jars -j"$(nproc)"
 
-            OUT_LINUX=$(find out -name build.ninja -printf '%h\n' | tail -1)
-            ninja -C "$OUT_LINUX" gen_snapshot -j20
+            FLUTTER_JAR="$(find "$ANDROID_OUT" -type f -name flutter.jar -print -quit)"
+            test -n "$FLUTTER_JAR"
+            cp "$FLUTTER_JAR" "$ART_DIR/flutter.jar"
 
-            cp "$OUT_LINUX/gen_snapshot" "$ART_DIR/linux-arm64/gen_snapshot"
+            # Flutter 工具在 Linux ARM64 主机上从 <android-engine>/linux-arm64/
+            # 加载 gen_snapshot。此处用稳定分支所带的 Engine 源码构建该可执行文件。
+            ./flutter/tools/gn \
+              --target-dir "ci/linux-arm64-${MODE}" \
+              --target-os linux \
+              --linux-cpu arm64 \
+              --runtime-mode "$MODE" \
+              --no-goma \
+              --no-enable-unittests \
+              --build-engine-artifacts
+            ninja -C "$LINUX_OUT" gen_snapshot -j"$(nproc)"
+
+            cp "$LINUX_OUT/gen_snapshot" "$ART_DIR/linux-arm64/gen_snapshot"
             chmod +x "$ART_DIR/linux-arm64/gen_snapshot"
+
+            test -s "$ART_DIR/flutter.jar"
+            test -x "$ART_DIR/linux-arm64/gen_snapshot"
+            file "$ART_DIR/linux-arm64/gen_snapshot" | grep -Eq 'ARM aarch64|aarch64'
           }
 
+          build_mode profile
           build_mode release
 
-      - name: Upload Single Target Artifact
+      - name: Upload single target artifact
         uses: actions/upload-artifact@v4
         with:
           name: engine-artifact-${{ matrix.target }}
-          path: flutter-mono/engine/src/export-${{ matrix.target }}/
+          path: export-${{ matrix.target }}/
+          if-no-files-found: error
           retention-days: 1
 
   # =========================================================
-  # Job 2: 组装 Ready-to-use SDK 并发布 Release
+  # Job 2: 组装 Flutter stable SDK，并创建/更新当天的 Release。
   # =========================================================
   assemble-and-package:
     name: Assemble SDK & Create Release
@@ -143,69 +148,87 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y tree file xz-utils curl unzip
 
-      - name: Download All Build Artifacts
+      - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
           path: fetched-artifacts
 
-      - name: Clone Clean Flutter SDK
+      - name: Clone clean stable Flutter SDK
         run: |
-          git clone -b stable https://github.com/flutter/flutter.git flutter-sdk
+          set -euxo pipefail
+          git clone --depth=1 --branch stable https://github.com/flutter/flutter.git flutter-sdk
+          echo "Packaged Engine version: $(cat flutter-sdk/bin/internal/engine.version)"
 
-      - name: Assemble All Built Artifacts & Fix Permissions
+      - name: Assemble built artifacts and ARM64 Dart SDK
         run: |
+          set -euxo pipefail
+
           ENGINE_CACHE_DIR="flutter-sdk/bin/cache/artifacts/engine"
           rm -rf "$ENGINE_CACHE_DIR"
           mkdir -p "$ENGINE_CACHE_DIR"
 
-          # 1. 注入自编译 Engine 碎片
-          find fetched-artifacts -mindepth 2 -maxdepth 2 -type d | while read dir; do
-            dirname=$(basename "$dir")
+          # artifacts 会按 <artifact-name>/<engine-directory> 解压。
+          while IFS= read -r -d '' dir; do
+            dirname="$(basename "$dir")"
             echo "Injecting engine artifact: $dirname"
             cp -a "$dir" "$ENGINE_CACHE_DIR/"
+          done < <(find fetched-artifacts -mindepth 2 -maxdepth 2 -type d -name 'android-*' -print0)
+
+          # 防止因上传目录布局异常而生成一个缺少产物的 SDK。
+          for target in android-arm android-arm64 android-x64; do
+            for mode in profile release; do
+              test -s "$ENGINE_CACHE_DIR/${target}-${mode}/flutter.jar"
+              test -x "$ENGINE_CACHE_DIR/${target}-${mode}/linux-arm64/gen_snapshot"
+            done
           done
 
-          ENGINE_COMMIT=$(cat flutter-sdk/bin/internal/engine.version)
-
-          # 2. 拉取匹配 Commit 的 Native Linux ARM64 Dart SDK
+          ENGINE_COMMIT="$(cat flutter-sdk/bin/internal/engine.version)"
           DART_SDK_URL="https://storage.googleapis.com/flutter_infra_release/flutter/${ENGINE_COMMIT}/dart-sdk-linux-arm64.zip"
-          echo "Fetching Native Linux ARM64 Dart SDK from: $DART_SDK_URL"
+          echo "Fetching Linux ARM64 Dart SDK: $DART_SDK_URL"
 
-          curl -sSL "$DART_SDK_URL" -o dart-sdk-arm64.zip
+          curl --fail --location --retry 3 --retry-all-errors \
+            "$DART_SDK_URL" -o dart-sdk-arm64.zip
+          unzip -tq dart-sdk-arm64.zip
           rm -rf flutter-sdk/bin/cache/dart-sdk
           unzip -q dart-sdk-arm64.zip -d flutter-sdk/bin/cache/
-          rm dart-sdk-arm64.zip
+          rm -f dart-sdk-arm64.zip
 
-          # 3. 写入 engine.stamp 锁定标记
+          # 阻止 flutter 工具用上游 x64 引擎产物覆盖已注入的 ARM64 产物。
           echo "$ENGINE_COMMIT" > flutter-sdk/bin/cache/engine.stamp
 
-          # 4. 统一递归赋予可执行权限 (+x)
-          echo "Granting execution permissions (+x)..."
           chmod +x flutter-sdk/bin/flutter
           chmod +x flutter-sdk/bin/cache/dart-sdk/bin/*
-          find flutter-sdk/bin/cache/artifacts/engine -name gen_snapshot -exec chmod +x {} \;
+          find "$ENGINE_CACHE_DIR" -type f -name gen_snapshot -exec chmod +x {} \;
 
-      - name: Verify Architecture & Permissions
+      - name: Verify ARM64 executables and artifact layout
         run: |
+          set -euxo pipefail
+
           DART_BIN="flutter-sdk/bin/cache/dart-sdk/bin/dart"
-          GEN_SNAPSHOT="flutter-sdk/bin/cache/artifacts/engine/android-arm64-release/linux-arm64/gen_snapshot"
+          file "$DART_BIN" | grep -Eq 'ARM aarch64|aarch64'
 
-          file "$DART_BIN" | grep "ARM aarch64" || (echo "ERROR: Dart Binary is NOT Linux ARM64!" && exit 1)
-          file "$GEN_SNAPSHOT" | grep "ARM aarch64" || (echo "ERROR: gen_snapshot is NOT Linux ARM64!" && exit 1)
+          for target in android-arm android-arm64 android-x64; do
+            for mode in profile release; do
+              GEN_SNAPSHOT="flutter-sdk/bin/cache/artifacts/engine/${target}-${mode}/linux-arm64/gen_snapshot"
+              file "$GEN_SNAPSHOT" | grep -Eq 'ARM aarch64|aarch64'
+            done
+          done
 
-      - name: Compress SDK Package
+      - name: Compress SDK package
         run: |
+          set -euxo pipefail
           tar -cJf flutter-linux-arm64.tar.xz flutter-sdk
           ls -lh flutter-linux-arm64.tar.xz
 
-      - name: Buffer Final Package to Actions Artifacts
+      - name: Buffer final package as an Actions artifact
         uses: actions/upload-artifact@v4
         with:
           name: flutter-linux-arm64-full-sdk
           path: flutter-linux-arm64.tar.xz
+          if-no-files-found: error
           retention-days: 7
 
-      - name: Generate Release Tag
+      - name: Generate release tag
         id: date
         run: |
           DATE="$(date -u +'%Y-%m-%d')"
@@ -217,13 +240,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euxo pipefail
           TAG="${{ steps.date.outputs.tag }}"
           DATE="${{ steps.date.outputs.date }}"
 
           gh release delete "$TAG" --yes --cleanup-tag || true
-
           gh release create "$TAG" \
             flutter-linux-arm64.tar.xz \
             --title "Flutter SDK (Linux ARM64 Out-of-the-Box) - $DATE" \
-            --notes "Out-of-the-box ready-to-use Flutter SDK for Linux ARM64 host devices (Full Mono-repo build)." \
+            --notes "Flutter stable SDK with Linux ARM64 Dart and Android AOT build artifacts for Linux ARM64 hosts." \
             --latest
