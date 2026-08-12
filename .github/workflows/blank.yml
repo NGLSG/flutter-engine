@@ -1,4 +1,4 @@
-name: Flutter Engine Daily Build
+name: Flutter Engine Daily Build ARM64
 
 
 on:
@@ -6,6 +6,7 @@ on:
   workflow_dispatch:
 
   schedule:
+
     - cron: "00 16 * * *"
 
 
@@ -19,15 +20,17 @@ permissions:
 jobs:
 
 
-# =====================================================
+
+# ==========================================================
 # Build Engine
-# =====================================================
+# ==========================================================
 
 
   build-engine:
 
 
     runs-on: ubuntu-latest
+
 
 
     strategy:
@@ -58,11 +61,12 @@ jobs:
 
 
 
+
     steps:
 
 
 
-    - name: Free disk
+    - name: Maximize disk
 
 
       uses: easimon/maximize-build-space@v4
@@ -70,12 +74,13 @@ jobs:
 
       with:
 
-
-        root-reserve-mb: 512
+        root-reserve-mb: 1024
         swap-size-mb: 8192
+
         remove-dotnet: true
         remove-haskell: true
         remove-android: true
+
 
 
 
@@ -122,19 +127,18 @@ jobs:
 
 
 
-# =====================================================
-# Sync Flutter + Engine
-# =====================================================
+# ==========================================================
+# Flutter checkout
+# ==========================================================
 
 
-    - name: Checkout Flutter
+    - name: Clone Flutter
 
 
       run: |
 
 
         git clone \
-        --depth 1 \
         -b stable \
         https://github.com/flutter/flutter.git \
         flutter
@@ -145,7 +149,7 @@ jobs:
 
 
 
-        echo "Flutter revision"
+        echo "Flutter commit"
 
         git rev-parse HEAD
 
@@ -160,7 +164,12 @@ jobs:
 
 
 
-    - name: Sync Engine
+# ==========================================================
+# gclient sync
+# ==========================================================
+
+
+    - name: Sync Engine dependencies
 
 
       run: |
@@ -174,17 +183,21 @@ jobs:
 
 
         gclient config \
-        --unmanaged \
         https://github.com/flutter/flutter.git
 
 
 
         gclient sync \
-        --no-history
+        -D
 
 
 
         gclient runhooks
+
+
+
+
+        echo "check engine"
 
 
 
@@ -193,12 +206,15 @@ jobs:
 
 
 
-# =====================================================
+# ==========================================================
 # Build
-# =====================================================
+# ==========================================================
 
 
     - name: Build Engine
+
+
+      shell: bash
 
 
       run: |
@@ -208,53 +224,65 @@ jobs:
 
 
 
+        mkdir -p ../../artifacts
+
+
+
         if [ "${{matrix.os}}" = "android" ]
         then
 
 
 
-        for MODE in profile release
+          for MODE in profile release
 
-        do
-
-
-
-        rm -rf out
+          do
 
 
-
-        ./flutter/tools/gn \
-          --android \
-          --android-cpu ${{matrix.cpu}} \
-          --runtime-mode $MODE \
-          --no-goma \
-          --no-enable-unittests
+            echo "BUILD android ${{matrix.cpu}} $MODE"
 
 
 
-        OUT=$(find out -name build.ninja -printf "%h\n" | head -1)
+            rm -rf out
 
 
 
-        ninja \
-          -C "$OUT" \
-          flutter.jar \
-          -j$(nproc)
+            ./flutter/tools/gn \
+              --android \
+              --android-cpu ${{matrix.cpu}} \
+              --runtime-mode=$MODE \
+              --no-goma \
+              --no-enable-unittests
 
 
 
-        mkdir -p \
-        ../../artifacts/${{matrix.target}}-$MODE
+            OUT=$(find out \
+              -name build.ninja \
+              -printf "%h\n" \
+              | head -1)
 
 
 
-        cp \
-        "$OUT/flutter.jar" \
-        ../../artifacts/${{matrix.target}}-$MODE/
+            ninja \
+              -C "$OUT" \
+              flutter.jar \
+              -j$(nproc)
 
 
 
-        done
+
+            mkdir -p \
+            ../../artifacts/android-${{matrix.cpu}}-$MODE
+
+
+
+            cp \
+            "$OUT/flutter.jar" \
+            ../../artifacts/android-${{matrix.cpu}}-$MODE/
+
+
+
+
+          done
 
 
 
@@ -263,53 +291,64 @@ jobs:
 
 
 
-        for MODE in profile release
+          for MODE in profile release
 
-        do
-
-
-
-        rm -rf out
+          do
 
 
 
-        ./flutter/tools/gn \
-          --target-os linux \
-          --linux-cpu arm64 \
-          --runtime-mode $MODE \
-          --no-goma \
-          --no-enable-unittests
+            echo "BUILD linux arm64 $MODE"
 
 
 
-        OUT=$(find out -name build.ninja -printf "%h\n" | head -1)
+            rm -rf out
 
 
 
-        ninja \
-          -C "$OUT" \
-          gen_snapshot \
-          -j$(nproc)
+            ./flutter/tools/gn \
+              --target-os linux \
+              --linux-cpu arm64 \
+              --runtime-mode=$MODE \
+              --no-goma \
+              --no-enable-unittests
 
 
 
-        mkdir -p \
-        ../../artifacts/linux-arm64-$MODE
+
+            OUT=$(find out \
+              -name build.ninja \
+              -printf "%h\n" \
+              | head -1)
 
 
 
-        cp \
-        "$OUT/gen_snapshot" \
-        ../../artifacts/linux-arm64-$MODE/
+
+            ninja \
+              -C "$OUT" \
+              gen_snapshot \
+              -j$(nproc)
 
 
 
-        chmod +x \
-        ../../artifacts/linux-arm64-$MODE/gen_snapshot
+
+            mkdir -p \
+            ../../artifacts/linux-arm64-$MODE
 
 
 
-        done
+            cp \
+            "$OUT/gen_snapshot" \
+            ../../artifacts/linux-arm64-$MODE/
+
+
+
+            chmod +x \
+            ../../artifacts/linux-arm64-$MODE/gen_snapshot
+
+
+
+          done
+
 
 
         fi
@@ -317,7 +356,8 @@ jobs:
 
 
 
-    - name: Upload artifacts
+
+    - name: Upload engine artifacts
 
 
       uses: actions/upload-artifact@v4
@@ -331,19 +371,19 @@ jobs:
 
         path:
 
-
           flutter/engine/artifacts
 
 
 
 
 
-# =====================================================
+# ==========================================================
 # Assemble SDK
-# =====================================================
+# ==========================================================
 
 
-  assemble:
+
+  assemble-sdk:
 
 
     needs: build-engine
@@ -357,7 +397,7 @@ jobs:
 
 
 
-    - name: Download
+    - name: Download artifacts
 
 
       uses: actions/download-artifact@v4
@@ -379,7 +419,6 @@ jobs:
 
 
         git clone \
-        --depth 1 \
         -b stable \
         https://github.com/flutter/flutter.git \
         flutter-sdk
@@ -388,25 +427,31 @@ jobs:
 
 
 
-
-    - name: Inject Engine
+    - name: Inject engine artifacts
 
 
       run: |
 
 
-
-        mkdir -p flutter-sdk/bin/cache/artifacts/engine
-
+        ENGINE_DIR=flutter-sdk/bin/cache/artifacts/engine
 
 
-        find artifacts -type f | while read f
+
+        rm -rf $ENGINE_DIR
+
+
+
+        mkdir -p $ENGINE_DIR
+
+
+
+        find artifacts \
+        -type f \
+        | while read f
 
         do
 
-
-          cp "$f" flutter-sdk/bin/cache/artifacts/engine/
-
+          cp "$f" "$ENGINE_DIR/"
 
         done
 
@@ -414,7 +459,7 @@ jobs:
 
 
 
-    - name: Install ARM64 Dart
+    - name: Install ARM64 Dart SDK
 
 
       run: |
@@ -424,9 +469,17 @@ jobs:
 
 
 
+        echo $ENGINE
+
+
+
+
         curl -L \
+
         https://storage.googleapis.com/flutter_infra_release/flutter/${ENGINE}/dart-sdk-linux-arm64.zip \
+
         -o dart.zip
+
 
 
 
@@ -436,6 +489,7 @@ jobs:
 
         unzip -q dart.zip \
         -d flutter-sdk/bin/cache
+
 
 
 
@@ -469,6 +523,24 @@ jobs:
 
 
 
+    - name: Verify
+
+
+      run: |
+
+
+        file flutter-sdk/bin/cache/dart-sdk/bin/dart
+
+
+
+        find flutter-sdk/bin/cache \
+        -name gen_snapshot \
+        -exec file {} \;
+
+
+
+
+
     - name: Package
 
 
@@ -481,7 +553,7 @@ jobs:
 
 
 
-    - name: Upload
+    - name: Upload SDK
 
 
       uses: actions/upload-artifact@v4
@@ -493,4 +565,6 @@ jobs:
         name: flutter-linux-arm64-sdk
 
 
-        path: flutter-linux-arm64.tar.xz
+        path:
+
+          flutter-linux-arm64.tar.xz
