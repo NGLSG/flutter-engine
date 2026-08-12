@@ -1,4 +1,4 @@
-name: Flutter Engine Daily Build
+name: Flutter Engine Daily Build (Mono-Repo)
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   # =========================================================
-  # Job 1: 矩阵构建 Engine 碎片（精确锁定与 SDK Stable 匹配的 Candidate 分支）
+  # Job 1: 多 Runner 矩阵，直接基于 Mono-repo 编译 Engine 碎片
   # =========================================================
   build-engine:
     name: Build ${{ matrix.target }}
@@ -53,38 +53,22 @@ jobs:
             zip unzip tree file xz-utils curl \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-      - name: Install depot_tools
+      # 1. 克隆合并后的 Mono-repo（Flutter SDK + Engine 同在一个仓库）
+      - name: Checkout Flutter Mono-repo (Stable)
         run: |
-          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
-          echo "$PWD/depot_tools" >> "$GITHUB_PATH"
+          git clone --depth 1 -b stable https://github.com/flutter/flutter.git flutter-mono
 
-      - name: Fetch Aligned Engine Version
-        run: |
-          # 1. 先抓取稳定版 SDK 获取精确 Engine Commit
-          git clone --depth 1 -b stable https://github.com/flutter/flutter.git temp-sdk
-          ENGINE_COMMIT=$(cat temp-sdk/bin/internal/engine.version )
-          echo "Target Aligned Engine Commit: $ENGINE_COMMIT"
-          rm -rf temp-sdk
-
-          mkdir flutter-engine
-          cd flutter-engine
-
-          # 2. 配置常规 Engine 框架并执行初始同步
-          gclient config --name src/flutter https://github.com/flutter/engine.git
-          gclient sync --no-history --nohooks
-
-          # 3. 进入 src/flutter 目录 ，直接通过精确 Commit SHA 从 origin 抓取并检出
-          cd src/flutter
-          git fetch origin "$ENGINE_COMMIT"
-          git checkout FETCH_HEAD
-          cd ../..
-
-          # 4. 同步该 Commit 对应的精确依赖库（保证 Kernel AST 对应）
-          gclient sync --no-history
-
+      # 2. 编译产物（路径直接指向子目录中的 engine 模块）
       - name: Build Engine Artifacts
         run: |
-          cd flutter-engine/src
+          # 寻找 engine 源码目录 (根据 Mono-repo 结构)
+          if [ -d "flutter-mono/engine/src" ]; then
+            ENGINE_SRC="flutter-mono/engine/src"
+          else
+            ENGINE_SRC="flutter-mono/engine"
+          fi
+
+          cd "$ENGINE_SRC"
           EXPORT_DIR="export-${{ matrix.target }}"
 
           build_mode() {
@@ -96,7 +80,7 @@ jobs:
             ART_DIR="$EXPORT_DIR/${{ matrix.target }}-${MODE}"
             mkdir -p "$ART_DIR/linux-arm64"
 
-            # 1. 如果是 Android 目标，编译 Android 的 flutter.jar
+            # A. Android 目标 -> 编 flutter.jar
             if [ "${{ matrix.os }}" = "android" ]; then
               rm -rf out
               ./flutter/tools/gn \
@@ -113,7 +97,7 @@ jobs:
               cp "$OUT_ANDROID/flutter.jar" "$ART_DIR/flutter.jar"
             fi
 
-            # 2. 独立配置 Linux ARM64，编译原生 Linux ARM64 ELF 格式的 gen_snapshot
+            # B. Linux ARM64 宿主 -> 编 gen_snapshot
             rm -rf out
             ./flutter/tools/gn \
               --target-os linux \
@@ -137,11 +121,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: engine-artifact-${{ matrix.target }}
-          path: flutter-engine/src/export-${{ matrix.target }}/
+          path: flutter-mono/engine/src/export-${{ matrix.target }}/ || flutter-mono/engine/export-${{ matrix.target }}/
           retention-days: 1
 
   # =========================================================
-  # Job 2: 组装 Flutter SDK 并发布 Release
+  # Job 2: 组装 Ready-to-use SDK 并发布 Release
   # =========================================================
   assemble-and-package:
     name: Assemble SDK & Create Release
@@ -169,16 +153,16 @@ jobs:
           rm -rf "$ENGINE_CACHE_DIR"
           mkdir -p "$ENGINE_CACHE_DIR"
 
-          # 1. 组装自编译 Engine 碎片
+          # 1. 注入自编译 Engine 碎片
           find fetched-artifacts -mindepth 2 -maxdepth 2 -type d | while read dir; do
-            dirname=$(basename "$dir" )
+            dirname=$(basename "$dir")
             echo "Injecting engine artifact: $dirname"
             cp -a "$dir" "$ENGINE_CACHE_DIR/"
           done
 
           ENGINE_COMMIT=$(cat flutter-sdk/bin/internal/engine.version)
 
-          # 2. 拉取原生 Linux ARM64 Dart SDK
+          # 2. 拉取匹配 Commit 的 Native Linux ARM64 Dart SDK
           DART_SDK_URL="https://storage.googleapis.com/flutter_infra_release/flutter/${ENGINE_COMMIT}/dart-sdk-linux-arm64.zip"
           echo "Fetching Native Linux ARM64 Dart SDK from: $DART_SDK_URL"
 
@@ -190,13 +174,13 @@ jobs:
           # 3. 写入 engine.stamp 锁定标记
           echo "$ENGINE_COMMIT" > flutter-sdk/bin/cache/engine.stamp
 
-          # 4. 赋予运行权限 (+x )
+          # 4. 统一递归赋予可执行权限 (+x)
           echo "Granting execution permissions (+x)..."
           chmod +x flutter-sdk/bin/flutter
           chmod +x flutter-sdk/bin/cache/dart-sdk/bin/*
           find flutter-sdk/bin/cache/artifacts/engine -name gen_snapshot -exec chmod +x {} \;
 
-      - name: Verify Architecture & Executable Permissions
+      - name: Verify Architecture & Permissions
         run: |
           DART_BIN="flutter-sdk/bin/cache/dart-sdk/bin/dart"
           GEN_SNAPSHOT="flutter-sdk/bin/cache/artifacts/engine/android-arm64-release/linux-arm64/gen_snapshot"
@@ -236,5 +220,5 @@ jobs:
           gh release create "$TAG" \
             flutter-linux-arm64.tar.xz \
             --title "Flutter SDK (Linux ARM64 Out-of-the-Box) - $DATE" \
-            --notes "Out-of-the-box ready-to-use Flutter SDK for Linux ARM64 host devices." \
+            --notes "Out-of-the-box ready-to-use Flutter SDK for Linux ARM64 host devices (Built from Mono-repo)." \
             --latest
