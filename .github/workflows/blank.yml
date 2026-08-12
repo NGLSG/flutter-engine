@@ -62,22 +62,21 @@ jobs:
         run: |
           # 1. 先抓取稳定版 SDK 获取精确 Engine Commit
           git clone --depth 1 -b stable https://github.com/flutter/flutter.git temp-sdk
-          ENGINE_COMMIT=$(cat temp-sdk/bin/internal/engine.version)
+          ENGINE_COMMIT=$(cat temp-sdk/bin/internal/engine.version )
           echo "Target Aligned Engine Commit: $ENGINE_COMMIT"
           rm -rf temp-sdk
 
           mkdir flutter-engine
           cd flutter-engine
 
-          # 2. 配置并拉取常规 Engine 框架
+          # 2. 配置常规 Engine 框架并执行初始同步
           gclient config --name src/flutter https://github.com/flutter/engine.git
           gclient sync --no-history --nohooks
 
-          # 3. 进入目录抓取分支列表（含候选 release 分支），检出精确 Commit
+          # 3. 进入 src/flutter 目录 ，直接通过精确 Commit SHA 从 origin 抓取并检出
           cd src/flutter
-          git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
-          git fetch origin --depth=100
-          git checkout "$ENGINE_COMMIT"
+          git fetch origin "$ENGINE_COMMIT"
+          git checkout FETCH_HEAD
           cd ../..
 
           # 4. 同步该 Commit 对应的精确依赖库（保证 Kernel AST 对应）
@@ -172,7 +171,7 @@ jobs:
 
           # 1. 组装自编译 Engine 碎片
           find fetched-artifacts -mindepth 2 -maxdepth 2 -type d | while read dir; do
-            dirname=$(basename "$dir")
+            dirname=$(basename "$dir" )
             echo "Injecting engine artifact: $dirname"
             cp -a "$dir" "$ENGINE_CACHE_DIR/"
           done
@@ -191,7 +190,7 @@ jobs:
           # 3. 写入 engine.stamp 锁定标记
           echo "$ENGINE_COMMIT" > flutter-sdk/bin/cache/engine.stamp
 
-          # 4. 赋予运行权限 (+x)
+          # 4. 赋予运行权限 (+x )
           echo "Granting execution permissions (+x)..."
           chmod +x flutter-sdk/bin/flutter
           chmod +x flutter-sdk/bin/cache/dart-sdk/bin/*
