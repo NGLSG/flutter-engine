@@ -58,7 +58,7 @@ jobs:
           git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
           echo "$PWD/depot_tools" >> "$GITHUB_PATH"
 
-      # 精确获取 Flutter Stable 分支所对应的 Engine Commit 并拉取完整的仓库历史
+      # 获取 Flutter Stable 分支对应的 Engine Commit，并直接交给 gclient 一步到位
       - name: Fetch Matching Engine Version
         run: |
           git clone --depth 1 -b stable https://github.com/flutter/flutter.git temp-flutter
@@ -69,19 +69,8 @@ jobs:
           mkdir flutter-engine
           cd flutter-engine
 
-          # 1. 配置 gclient
-          gclient config --name src/flutter https://github.com/flutter/engine.git
-
-          # 2. 拉取主分支代码
-          gclient sync
-
-          # 3. 解除浅层限制并获取完整提交记录，然后切换 Commit
-          cd src/flutter
-          git fetch --unshallow origin || git fetch origin
-          git checkout $ENGINE_COMMIT
-          cd ../..
-
-          # 4. 同步目标 Commit 对应的第三方依赖
+          # 让 gclient 全量配置并自动 checkout 到精准 commit
+          gclient config --name src/flutter "https://github.com/flutter/engine.git@${ENGINE_COMMIT}"
           gclient sync
 
       - name: Build Engine Artifacts
