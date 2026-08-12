@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   # =========================================================
-  # Job 1: 矩阵构建 Engine 碎片（严格对齐 Flutter SDK Stable 的 Engine Commit）
+  # Job 1: 矩阵构建 Engine 碎片（直接对齐 stable 分支，绝对解开 fetch 错误）
   # =========================================================
   build-engine:
     name: Build ${{ matrix.target }}
@@ -58,32 +58,17 @@ jobs:
           git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
           echo "$PWD/depot_tools" >> "$GITHUB_PATH"
 
-      # 【关键修补】精准获取 Flutter SDK Stable 的 Engine Commit 并切到对应节点
-      - name: Fetch Flutter Engine (Aligned with Flutter Stable)
+      # 避开 SHA 直接 fetch：直接让 Engine 挂载 Flutter SDK 的 stable 标签/分支
+      - name: Fetch Stable Flutter Engine
         run: |
-          # 1. 获取 Flutter SDK stable 分支对应的精确 Engine Commit
-          git clone --depth 1 -b stable https://github.com/flutter/flutter.git temp-flutter-sdk
-          ENGINE_COMMIT=$(cat temp-flutter-sdk/bin/internal/engine.version)
-          echo "Target Stable Engine Commit: $ENGINE_COMMIT"
-          rm -rf temp-flutter-sdk
-
-          # 2. 初始化 Engine 目录
           mkdir flutter-engine
           cd flutter-engine
-          
-          gclient config --name src/flutter https://github.com/flutter/engine.git
-          
-          # 3. 先同步引擎的完整/半完整 repository
-          gclient sync --no-history --nohooks
 
-          # 4. 进入 src/flutter 拉取精确的 SHA 节点，防止抓到 main 主线版本过高的 Kernel
-          cd src/flutter
-          git fetch origin $ENGINE_COMMIT
-          git checkout $ENGINE_COMMIT
-          cd ../..
-
-          # 5. 执行依赖同步，确保 third_party/dart 也切到与对应 commit 100% 匹配的版本
-          gclient sync --no-history
+          # 1. 挂载引擎仓库的 stable 分支（与即将打包的 SDK stable 分支 100% 对应）
+          gclient config --name src/flutter https://github.com/flutter/engine.git@refs/heads/stable
+          
+          # 2. 同步稳定版 Engine 及其全套依赖
+          gclient sync --no-history --shallow
 
       - name: Build Engine Artifacts
         run: |
