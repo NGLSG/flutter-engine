@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   # =========================================================
-  # Job 1: 多 Runner 矩阵，直接基于 Mono-repo 编译 Engine 碎片
+  # Job 1: 基于 Mono-Repo 矩阵编译 Engine 碎片
   # =========================================================
   build-engine:
     name: Build ${{ matrix.target }}
@@ -53,22 +53,25 @@ jobs:
             zip unzip tree file xz-utils curl \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-      # 1. 克隆合并后的 Mono-repo（Flutter SDK + Engine 同在一个仓库）
+      # 1. 安装 depot_tools 并提供 vpython3 支持
+      - name: Install depot_tools
+        run: |
+          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          echo "$PWD/depot_tools" >> $GITHUB_PATH
+
+      # 2. 克隆包含 SDK + Engine 源码的 Mono-repo (Stable 分支)
       - name: Checkout Flutter Mono-repo (Stable)
         run: |
           git clone --depth 1 -b stable https://github.com/flutter/flutter.git flutter-mono
 
-      # 2. 编译产物（路径直接指向子目录中的 engine 模块）
+      # 3. 编译 Engine 碎片 (确保包含 depot_tools 在 PATH 中)
       - name: Build Engine Artifacts
         run: |
-          # 寻找 engine 源码目录 (根据 Mono-repo 结构)
-          if [ -d "flutter-mono/engine/src" ]; then
-            ENGINE_SRC="flutter-mono/engine/src"
-          else
-            ENGINE_SRC="flutter-mono/engine"
-          fi
+          # 确保 vpython3 在 PATH 中
+          export PATH="$PWD/depot_tools:$PATH"
 
-          cd "$ENGINE_SRC"
+          # 准确进入截图中的 engine/src 源码目录
+          cd flutter-mono/engine/src
           EXPORT_DIR="export-${{ matrix.target }}"
 
           build_mode() {
@@ -121,7 +124,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: engine-artifact-${{ matrix.target }}
-          path: flutter-mono/engine/src/export-${{ matrix.target }}/ || flutter-mono/engine/export-${{ matrix.target }}/
+          path: flutter-mono/engine/src/export-${{ matrix.target }}/
           retention-days: 1
 
   # =========================================================
