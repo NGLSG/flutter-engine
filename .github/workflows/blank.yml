@@ -2,12 +2,6 @@ name: Flutter Engine Daily Build
 
 on:
   workflow_dispatch:
-    inputs:
-      flutter_version:
-        description: "要构建的 Flutter SDK 稳定版本 Tag (例如: 3.29.0, 3.27.0)"
-        required: true
-        default: "3.29.0"
-        type: string
   schedule:
     - cron: "00 16 * * *"
 
@@ -16,7 +10,7 @@ permissions:
 
 jobs:
   # =========================================================
-  # Job 1: 矩阵构建，按指定 Flutter 版本编译 Engine
+  # Job 1: 矩阵构建 Engine 碎片（严格对齐 Flutter SDK Stable 的 Engine Commit）
   # =========================================================
   build-engine:
     name: Build ${{ matrix.target }}
@@ -64,32 +58,32 @@ jobs:
           git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
           echo "$PWD/depot_tools" >> "$GITHUB_PATH"
 
-      # 获取指定的 Flutter SDK 版本并拉取对应的 Engine 源码
-      - name: Fetch Target Flutter Engine
+      # 【关键修补】精准获取 Flutter SDK Stable 的 Engine Commit 并切到对应节点
+      - name: Fetch Flutter Engine (Aligned with Flutter Stable)
         run: |
-          FLUTTER_VER="${{ github.event.inputs.flutter_version || '3.29.0' }}"
-          echo "Target Flutter Version Tag: $FLUTTER_VER"
+          # 1. 获取 Flutter SDK stable 分支对应的精确 Engine Commit
+          git clone --depth 1 -b stable https://github.com/flutter/flutter.git temp-flutter-sdk
+          ENGINE_COMMIT=$(cat temp-flutter-sdk/bin/internal/engine.version)
+          echo "Target Stable Engine Commit: $ENGINE_COMMIT"
+          rm -rf temp-flutter-sdk
 
-          # 1. 克隆指定 Tag 的 Flutter SDK
-          git clone --depth 1 -b "$FLUTTER_VER" https://github.com/flutter/flutter.git temp-flutter
-          ENGINE_COMMIT=$(cat temp-flutter/bin/internal/engine.version)
-          echo "Target Engine Commit: $ENGINE_COMMIT"
-          rm -rf temp-flutter
-
+          # 2. 初始化 Engine 目录
           mkdir flutter-engine
           cd flutter-engine
-
-          # 2. 拉取稳定分支的主干 Engine，然后直接 checkout 到该 Commit
+          
           gclient config --name src/flutter https://github.com/flutter/engine.git
+          
+          # 3. 先同步引擎的完整/半完整 repository
           gclient sync --no-history --nohooks
 
+          # 4. 进入 src/flutter 拉取精确的 SHA 节点，防止抓到 main 主线版本过高的 Kernel
           cd src/flutter
-          git fetch origin "$ENGINE_COMMIT" --depth=1
-          git checkout "$ENGINE_COMMIT"
+          git fetch origin $ENGINE_COMMIT
+          git checkout $ENGINE_COMMIT
           cd ../..
 
-          # 3. 补全依赖项
-          gclient sync
+          # 5. 执行依赖同步，确保 third_party/dart 也切到与对应 commit 100% 匹配的版本
+          gclient sync --no-history
 
       - name: Build Engine Artifacts
         run: |
@@ -105,7 +99,7 @@ jobs:
             ART_DIR="$EXPORT_DIR/${{ matrix.target }}-${MODE}"
             mkdir -p "$ART_DIR/linux-arm64"
 
-            # 1. 如果是 Android 目标，编译 Android 运行库 flutter.jar
+            # 1. 如果是 Android 目标，编译 Android 的 flutter.jar
             if [ "${{ matrix.os }}" = "android" ]; then
               rm -rf out
               ./flutter/tools/gn \
@@ -150,7 +144,7 @@ jobs:
           retention-days: 1
 
   # =========================================================
-  # Job 2: 组装 SDK，赋予执行权限，缓冲并发布
+  # Job 2: 组装 Flutter SDK 并发布 Release
   # =========================================================
   assemble-and-package:
     name: Assemble SDK & Create Release
@@ -170,8 +164,7 @@ jobs:
 
       - name: Clone Clean Flutter SDK
         run: |
-          FLUTTER_VER="${{ github.event.inputs.flutter_version || '3.29.0' }}"
-          git clone --depth 1 -b "$FLUTTER_VER" https://github.com/flutter/flutter.git flutter-sdk
+          git clone --depth 1 -b stable https://github.com/flutter/flutter.git flutter-sdk
 
       - name: Assemble All Built Artifacts & Fix Permissions
         run: |
@@ -200,8 +193,8 @@ jobs:
           # 3. 写入 engine.stamp 锁定标记
           echo "$ENGINE_COMMIT" > flutter-sdk/bin/cache/engine.stamp
 
-          # 4. 统一递归赋予可执行权限 (+x)
-          echo "Granting execution permissions (+x) to all host binaries..."
+          # 4. 赋予运行权限 (+x)
+          echo "Granting execution permissions (+x)..."
           chmod +x flutter-sdk/bin/flutter
           chmod +x flutter-sdk/bin/cache/dart-sdk/bin/*
           find flutter-sdk/bin/cache/artifacts/engine -name gen_snapshot -exec chmod +x {} \;
@@ -210,10 +203,6 @@ jobs:
         run: |
           DART_BIN="flutter-sdk/bin/cache/dart-sdk/bin/dart"
           GEN_SNAPSHOT="flutter-sdk/bin/cache/artifacts/engine/android-arm64-release/linux-arm64/gen_snapshot"
-
-          echo "Permissions verification:"
-          ls -l "$DART_BIN"
-          ls -l "$GEN_SNAPSHOT"
 
           file "$DART_BIN" | grep "ARM aarch64" || (echo "ERROR: Dart Binary is NOT Linux ARM64!" && exit 1)
           file "$GEN_SNAPSHOT" | grep "ARM aarch64" || (echo "ERROR: gen_snapshot is NOT Linux ARM64!" && exit 1)
@@ -234,8 +223,7 @@ jobs:
         id: date
         run: |
           DATE="$(date -u +'%Y-%m-%d')"
-          FLUTTER_VER="${{ github.event.inputs.flutter_version || '3.29.0' }}"
-          TAG="v${FLUTTER_VER}-linux-arm64-${DATE}"
+          TAG="${DATE}-daily-build"
           echo "date=$DATE" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
@@ -245,12 +233,11 @@ jobs:
         run: |
           TAG="${{ steps.date.outputs.tag }}"
           DATE="${{ steps.date.outputs.date }}"
-          FLUTTER_VER="${{ github.event.inputs.flutter_version || '3.29.0' }}"
 
           gh release delete "$TAG" --yes --cleanup-tag || true
 
           gh release create "$TAG" \
             flutter-linux-arm64.tar.xz \
-            --title "Flutter SDK $FLUTTER_VER (Linux ARM64 Out-of-the-Box)" \
-            --notes "Out-of-the-box ready-to-use Flutter SDK v$FLUTTER_VER for Linux ARM64 host devices. Build Date: $DATE" \
+            --title "Flutter SDK (Linux ARM64 Out-of-the-Box) - $DATE" \
+            --notes "Out-of-the-box ready-to-use Flutter SDK for Linux ARM64 host devices." \
             --latest
