@@ -1,101 +1,327 @@
-name: Resume Assemble & Release from Run ID
+name: Resume Flutter ARM64 Offline SDK Assembly
 
 on:
   workflow_dispatch:
     inputs:
-      run_id:
-        description: "上次构建成功的 Actions Run ID"
+      source_run_id:
+        description: "Source Actions run ID containing gensnapshot-* artifacts"
         required: true
         type: string
+      flutter_sha:
+        description: "Optional Flutter commit override (normally parsed from source run logs)"
+        required: false
+        type: string
+      engine_sha:
+        description: "Optional Engine commit override (normally parsed from source run logs)"
+        required: false
+        type: string
+      publish_release:
+        description: "Publish the assembled SDK as a GitHub Release"
+        required: true
+        default: true
+        type: boolean
 
 permissions:
+  actions: read
   contents: write
 
 jobs:
-  assemble-and-package:
-    name: Resume Assemble SDK & Create Release
+
+  # Resolve the exact revisions used by the source run. The original workflow
+  # prints both values in its resolve job, so an already-failed run can be
+  # resumed without rebuilding the six gen_snapshot artifacts.
+  resolve-source:
+    name: Resolve source run
     runs-on: ubuntu-latest
-
+    outputs:
+      flutter_sha: ${{ steps.resolve.outputs.flutter_sha }}
+      engine_sha: ${{ steps.resolve.outputs.engine_sha }}
     steps:
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y tree file xz-utils curl unzip
 
-      - name: Download Engine Artifacts from Specified Run ID
+      - name: Read source run metadata
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          INPUT_FLUTTER_SHA: ${{ inputs.flutter_sha }}
+          INPUT_ENGINE_SHA: ${{ inputs.engine_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]] \
+            || { echo "FATAL: source_run_id must be numeric"; exit 1; }
+
+          gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" \
+            --jq '"source workflow=\(.name) status=\(.status) conclusion=\(.conclusion)"'
+
+          FLUTTER_SHA="$INPUT_FLUTTER_SHA"
+          ENGINE_SHA="$INPUT_ENGINE_SHA"
+
+          if [ -z "$FLUTTER_SHA" ] || [ -z "$ENGINE_SHA" ]; then
+            LOG="$(mktemp)"
+            trap 'rm -f "$LOG"' EXIT
+            gh run view "$SOURCE_RUN_ID" \
+              --repo "$GITHUB_REPOSITORY" \
+              --log > "$LOG"
+
+            if [ -z "$FLUTTER_SHA" ]; then
+              FLUTTER_SHA="$(
+                awk '/stable flutter = [0-9a-f]+/ {print $NF; exit}' "$LOG" \
+                  | tr -d '\r'
+              )"
+            fi
+            if [ -z "$ENGINE_SHA" ]; then
+              ENGINE_SHA="$(
+                awk '/engine.version = [0-9a-f]+/ {print $NF; exit}' "$LOG" \
+                  | tr -d '\r'
+              )"
+            fi
+          fi
+
+          [[ "$FLUTTER_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "FATAL: could not resolve Flutter commit"; exit 1; }
+          [[ "$ENGINE_SHA" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "FATAL: could not resolve Engine commit"; exit 1; }
+
+          REMOTE_ENGINE="$(
+            curl -fsSL \
+              "https://raw.githubusercontent.com/flutter/flutter/$FLUTTER_SHA/bin/internal/engine.version" \
+              | tr -d '\r\n'
+          )"
+          [ "$REMOTE_ENGINE" = "$ENGINE_SHA" ] || {
+            echo "FATAL: Flutter/Engine revision mismatch"
+            echo "Flutter $FLUTTER_SHA expects $REMOTE_ENGINE, source says $ENGINE_SHA"
+            exit 1
+          }
+
+          echo "flutter_sha=$FLUTTER_SHA" >> "$GITHUB_OUTPUT"
+          echo "engine_sha=$ENGINE_SHA" >> "$GITHUB_OUTPUT"
+          echo "Flutter: $FLUTTER_SHA"
+          echo "Engine:  $ENGINE_SHA"
+
+  assemble-sdk:
+    name: Assemble SDK from run ${{ inputs.source_run_id }}
+    needs: resolve-source
+    runs-on: ubuntu-24.04-arm
+    steps:
+
+      - name: Install tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y git curl unzip xz-utils file tree
+
+      - name: Download source run gen_snapshot artifacts
         uses: actions/download-artifact@v4
         with:
-          run-id: ${{ github.event.inputs.run_id }}
-          path: fetched-artifacts
+          pattern: gensnapshot-*
+          path: gensnapshots
+          merge-multiple: true
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Clone Clean Flutter SDK
+      - name: Verify recovered gen_snapshot artifacts
         run: |
-          git clone --depth 1 -b stable https://github.com/flutter/flutter.git flutter-sdk
+          set -euo pipefail
+          test "$(uname -m)" = "aarch64"
+          for CPU in arm arm64 x64; do
+            for MODE in profile release; do
+              GEN="gensnapshots/android-${CPU}-${MODE}/linux-arm64/gen_snapshot"
+              test -s "$GEN" \
+                || { echo "FATAL: source run artifact missing $GEN"; exit 1; }
+              chmod +x "$GEN"
+              file "$GEN"
+              file "$GEN" | grep -q "ARM aarch64" \
+                || { echo "FATAL: $GEN is not an ARM64 host binary"; exit 1; }
+            done
+          done
+          tree gensnapshots
 
-      - name: Assemble All Built Artifacts & Fix Permissions
+      - name: Checkout pinned Flutter SDK
         run: |
-          ENGINE_CACHE_DIR="flutter-sdk/bin/cache/artifacts/engine"
-          rm -rf "$ENGINE_CACHE_DIR"
-          mkdir -p "$ENGINE_CACHE_DIR"
+          set -euo pipefail
+          git clone https://github.com/flutter/flutter.git flutter-sdk
+          cd flutter-sdk
+          git checkout "${{ needs.resolve-source.outputs.flutter_sha }}"
+          test "$(cat bin/internal/engine.version)" = \
+            "${{ needs.resolve-source.outputs.engine_sha }}"
+          echo "SDK Flutter: $(git rev-parse HEAD)"
+          echo "SDK Engine : $(cat bin/internal/engine.version)"
 
-          # 1. 注入 Engine 碎片
-          find fetched-artifacts -mindepth 2 -maxdepth 2 -type d | while read dir; do
-            dirname=$(basename "$dir")
-            echo "Injecting engine artifact: $dirname"
-            cp -a "$dir" "$ENGINE_CACHE_DIR/"
+      - name: Bootstrap Linux ARM64 SDK
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/flutter-sdk/bin:$PATH"
+          flutter --version
+
+      - name: Pull official Android Engine artifacts
+        env:
+          ENGINE: ${{ needs.resolve-source.outputs.engine_sha }}
+        run: |
+          set -euo pipefail
+          ENGINE_DIR="flutter-sdk/bin/cache/artifacts/engine"
+          CACHE_DIR="flutter-sdk/bin/cache"
+          STORAGE_BASE_URL="${FLUTTER_STORAGE_BASE_URL:-https://storage.googleapis.com}"
+          BASE_URL="${STORAGE_BASE_URL}/flutter_infra_release/flutter/${ENGINE}"
+          TMP="$(mktemp -d)"
+          trap 'rm -rf "$TMP"' EXIT
+
+          # Target-side engine archives. x86 is retained because the current
+          # Flutter cache validator expects its directory, while the requested
+          # production targets are arm, arm64 and x64.
+          for DIR in \
+            android-x86 \
+            android-arm android-arm-profile android-arm-release \
+            android-arm64 android-arm64-profile android-arm64-release \
+            android-x64 android-x64-profile android-x64-release; do
+            echo "Downloading ${DIR}/artifacts.zip"
+            ARCHIVE="$TMP/${DIR}-artifacts.zip"
+            DEST="$ENGINE_DIR/$DIR"
+            curl --fail --location --retry 5 --retry-all-errors \
+              "$BASE_URL/$DIR/artifacts.zip" \
+              --output "$ARCHIVE"
+            rm -rf "$DEST"
+            mkdir -p "$DEST"
+            unzip -q "$ARCHIVE" -d "$DEST"
+            test -s "$DEST/flutter.jar" \
+              || { echo "FATAL: $DEST/flutter.jar missing"; exit 1; }
+            unzip -tqq "$DEST/flutter.jar"
           done
 
-          ENGINE_COMMIT=$(cat flutter-sdk/bin/internal/engine.version)
+          # Current stable validates these linux-x64 host directories even on
+          # ARM64. Keep them beside the recovered linux-arm64 binaries so the
+          # packaged SDK remains cache-complete and does not redownload.
+          for DIR in \
+            android-arm-profile android-arm-release \
+            android-arm64-profile android-arm64-release \
+            android-x64-profile android-x64-release; do
+            echo "Downloading ${DIR}/linux-x64.zip"
+            ARCHIVE="$TMP/${DIR}-linux-x64.zip"
+            DEST="$ENGINE_DIR/$DIR/linux-x64"
+            curl --fail --location --retry 5 --retry-all-errors \
+              "$BASE_URL/$DIR/linux-x64.zip" \
+              --output "$ARCHIVE"
+            rm -rf "$DEST"
+            mkdir -p "$DEST"
+            unzip -q "$ARCHIVE" -d "$DEST"
+            test -s "$DEST/gen_snapshot" \
+              || { echo "FATAL: $DEST/gen_snapshot missing"; exit 1; }
+            chmod +x "$DEST/gen_snapshot"
+          done
 
-          # 2. 注入 Native Linux ARM64 Dart SDK
-          DART_SDK_URL="https://storage.googleapis.com/flutter_infra_release/flutter/${ENGINE_COMMIT}/dart-sdk-linux-arm64.zip"
-          echo "Fetching Native Linux ARM64 Dart SDK from: $DART_SDK_URL"
+          printf '%s' "$ENGINE" > "$CACHE_DIR/android-internal-build-artifacts.stamp"
+          printf '%s' "$ENGINE" > "$CACHE_DIR/android-sdk.stamp"
 
-          curl -sSL "$DART_SDK_URL" -o dart-sdk-arm64.zip
-          rm -rf flutter-sdk/bin/cache/dart-sdk
-          unzip -q dart-sdk-arm64.zip -d flutter-sdk/bin/cache/
-          rm dart-sdk-arm64.zip
-
-          # 3. 写入 engine.stamp 锁定标记
-          echo "$ENGINE_COMMIT" > flutter-sdk/bin/cache/engine.stamp
-
-          # 4. 【修复权限】赋予所有二进制 +x 运行权限
-          echo "Granting execution permissions (+x)..."
-          chmod +x flutter-sdk/bin/flutter
-          chmod +x flutter-sdk/bin/cache/dart-sdk/bin/*
-          find flutter-sdk/bin/cache/artifacts/engine -name gen_snapshot -exec chmod +x {} \;
-
-      - name: Compress SDK Package
+      - name: Inject recovered Linux ARM64 gen_snapshots
         run: |
-          tar -cJf flutter-linux-arm64.tar.xz flutter-sdk
-          ls -lh flutter-linux-arm64.tar.xz
+          set -euo pipefail
+          ENGINE_DIR="flutter-sdk/bin/cache/artifacts/engine"
+          cp -a gensnapshots/. "$ENGINE_DIR"/
+          find "$ENGINE_DIR" -type f -name gen_snapshot -path "*linux-arm64*" \
+            -exec chmod +x {} \;
 
-      - name: Buffer Final Package to Actions Artifacts
+      - name: Verify complete offline SDK
+        run: |
+          set -euo pipefail
+          ENGINE_DIR="flutter-sdk/bin/cache/artifacts/engine"
+
+          DART="flutter-sdk/bin/cache/dart-sdk/bin/dart"
+          test -x "$DART"
+          file "$DART" | tee /dev/stderr | grep -q "ARM aarch64"
+
+          for TOOL in flutter_tester impellerc; do
+            BIN="$ENGINE_DIR/linux-arm64/$TOOL"
+            test -x "$BIN"
+            file "$BIN" | tee /dev/stderr | grep -q "ARM aarch64"
+          done
+          test -f "$ENGINE_DIR/linux-arm64/frontend_server_aot.dart.snapshot"
+          test -d "$ENGINE_DIR/linux-arm64/shader_lib"
+          test -f "$ENGINE_DIR/common/flutter_patched_sdk/platform_strong.dill"
+          test -f "$ENGINE_DIR/common/flutter_patched_sdk_product/platform_strong.dill"
+
+          for DIR in \
+            android-arm android-arm-profile android-arm-release \
+            android-arm64 android-arm64-profile android-arm64-release \
+            android-x64 android-x64-profile android-x64-release; do
+            JAR="$ENGINE_DIR/$DIR/flutter.jar"
+            test -s "$JAR" \
+              || { echo "FATAL: $JAR missing"; exit 1; }
+            unzip -tqq "$JAR"
+            sha256sum "$JAR"
+          done
+
+          COUNT=0
+          for CPU in arm arm64 x64; do
+            for MODE in profile release; do
+              GEN="$ENGINE_DIR/android-${CPU}-${MODE}/linux-arm64/gen_snapshot"
+              test -x "$GEN" \
+                || { echo "FATAL: $GEN missing"; exit 1; }
+              file "$GEN" | grep -q "ARM aarch64" \
+                || { echo "FATAL: $GEN has wrong architecture"; exit 1; }
+              COUNT=$((COUNT + 1))
+            done
+          done
+          [ "$COUNT" -eq 6 ]
+
+          test -s "flutter-sdk/bin/cache/android-internal-build-artifacts.stamp"
+          test -s "flutter-sdk/bin/cache/android-sdk.stamp"
+          flutter-sdk/bin/flutter --version
+
+      - name: Package offline SDK
+        run: |
+          set -euo pipefail
+          cat > flutter-sdk/OFFLINE-SDK-MANIFEST.txt <<EOF
+          Flutter Linux ARM64 offline SDK
+          Recovered from Actions run: ${{ inputs.source_run_id }}
+          Flutter commit: ${{ needs.resolve-source.outputs.flutter_sha }}
+          Engine commit:  ${{ needs.resolve-source.outputs.engine_sha }}
+          Host:           linux-arm64
+          Android Engine: official arm, arm64, x64 flutter.jar (debug/profile/release)
+          Android AOT:    recovered arm, arm64, x64 gen_snapshot (profile/release)
+          EOF
+          tar -cJf flutter-linux-arm64-offline-sdk.tar.xz flutter-sdk
+          ls -lh flutter-linux-arm64-offline-sdk.tar.xz
+
+      - name: Upload assembled SDK
         uses: actions/upload-artifact@v4
         with:
-          name: flutter-linux-arm64-full-sdk
-          path: flutter-linux-arm64.tar.xz
+          name: flutter-linux-arm64-offline-sdk
+          path: flutter-linux-arm64-offline-sdk.tar.xz
+          if-no-files-found: error
           retention-days: 7
 
-      - name: Generate Release Tag
-        id: date
-        run: |
-          DATE="$(date -u +'%Y-%m-%d')"
-          TAG="${DATE}-daily-build"
-          echo "date=$DATE" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+  release:
+    name: Publish recovered SDK
+    if: ${{ inputs.publish_release }}
+    needs: [resolve-source, assemble-sdk]
+    runs-on: ubuntu-latest
+    steps:
 
-      - name: Create GitHub Release via GitHub CLI
+      - name: Download assembled SDK
+        uses: actions/download-artifact@v4
+        with:
+          name: flutter-linux-arm64-offline-sdk
+
+      - name: Generate release tag
+        id: release
+        run: |
+          set -euo pipefail
+          DATE="$(date -u +'%Y-%m-%d')"
+          echo "date=$DATE" >> "$GITHUB_OUTPUT"
+          echo "tag=${DATE}-daily-build" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ steps.date.outputs.tag }}"
-          DATE="${{ steps.date.outputs.date }}"
-
+          set -euo pipefail
+          TAG="${{ steps.release.outputs.tag }}"
+          DATE="${{ steps.release.outputs.date }}"
+          test -f flutter-linux-arm64-offline-sdk.tar.xz
           gh release delete "$TAG" --yes --cleanup-tag || true
-
           gh release create "$TAG" \
-            flutter-linux-arm64.tar.xz \
-            --title "Flutter SDK (Linux ARM64 Out-of-the-Box) - $DATE" \
-            --notes "Resumed build - Out-of-the-box ready-to-use Flutter SDK for Linux ARM64 host devices." \
+            flutter-linux-arm64-offline-sdk.tar.xz \
+            --title "Flutter Offline SDK (Linux ARM64) - $DATE" \
+            --notes "Resumed from Actions run ${{ inputs.source_run_id }}. Includes official Android arm/arm64/x64 engine artifacts and recovered ARM64-host profile/release gen_snapshot binaries." \
             --latest
