@@ -224,8 +224,10 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$PWD/flutter-sdk/bin:$PATH"
-          # arm64 host => downloads dart-sdk-linux-arm64 + builds the tool.
+          # Bootstrap Dart/flutter_tools, then populate common patched SDK
+          # files and all Linux ARM64 host-side engine tools.
           flutter --version
+          flutter precache --universal
 
       - name: Pull official Android flutter.jar artifacts
         run: |
@@ -406,9 +408,13 @@ jobs:
           set -euo pipefail
           TAG="${{ steps.date.outputs.tag }}"
           DATE="${{ steps.date.outputs.date }}"
-          gh release delete "$TAG" --yes --cleanup-tag || true
+          gh release delete "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --yes \
+            --cleanup-tag || true
           gh release create "$TAG" \
             flutter-linux-arm64-offline-sdk.tar.xz \
+            --repo "$GITHUB_REPOSITORY" \
             --title "Flutter Offline SDK (Linux ARM64) - $DATE" \
             --notes "Complete pre-cached Flutter SDK for Linux ARM64. Includes official Android arm/arm64/x64 flutter.jar artifacts for debug/profile/release and source-built ARM64-host gen_snapshot binaries for profile/release." \
             --latest
