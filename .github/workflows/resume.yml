@@ -327,9 +327,13 @@ jobs:
           TAG="${{ steps.release.outputs.tag }}"
           DATE="${{ steps.release.outputs.date }}"
           test -f flutter-linux-arm64-offline-sdk.tar.xz
-          gh release delete "$TAG" --yes --cleanup-tag || true
+          gh release delete "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --yes \
+            --cleanup-tag || true
           gh release create "$TAG" \
             flutter-linux-arm64-offline-sdk.tar.xz \
+            --repo "$GITHUB_REPOSITORY" \
             --title "Flutter Offline SDK (Linux ARM64) - $DATE" \
             --notes "Resumed from Actions run ${{ inputs.source_run_id }}. Includes official Android arm/arm64/x64 engine artifacts and recovered ARM64-host profile/release gen_snapshot binaries." \
             --latest
