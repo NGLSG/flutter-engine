@@ -1,383 +1,184 @@
-name: Flutter Engine Linux ARM64 Build
+name: Flutter Engine Daily Build
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 16 * * *"
+    - cron: "00 16 * * *"
 
 permissions:
   contents: write
 
-
 jobs:
-
-# =========================================================
-# Build Engine Artifacts
-# =========================================================
-
   build-engine:
-
+    name: Build ${{ matrix.target }}
     runs-on: ubuntu-latest
-
     strategy:
       fail-fast: false
-
       matrix:
         include:
-
-          - abi: arm
-            target: android-arm
-
-          - abi: arm64
-            target: android-arm64
-
-          - abi: x64
-            target: android-x64
-
-
+          - target: android-arm64
+            os: android
+            cpu: arm64
+          - target: android-x64
+            os: android
+            cpu: x64
+          - target: linux-arm64
+            os: linux
+            cpu: arm64
     steps:
-
-
-    - name: Free disk
-      uses: easimon/maximize-build-space@v4
-      with:
-        root-reserve-mb: 1024
-        swap-size-mb: 4096
-        remove-dotnet: true
-        remove-haskell: true
-        remove-android: true
-
-
-    - name: Install deps
-      run: |
-
-        sudo apt update
-
-        sudo apt install -y \
-          git \
-          ninja-build \
-          clang \
-          python3 \
-          python-is-python3 \
-          curl \
-          unzip \
-          zip \
-          xz-utils \
-          gcc-aarch64-linux-gnu \
-          g++-aarch64-linux-gnu
-
-
-
-    - name: Install depot_tools
-      run: |
-
-        git clone --depth=1 \
-          https://chromium.googlesource.com/chromium/tools/depot_tools.git
-
-        echo "$PWD/depot_tools" >> $GITHUB_PATH
-
-
-
-    - name: Clone Flutter
-      run: |
-
-        git clone \
-          --depth=1 \
-          -b stable \
-          https://github.com/flutter/flutter.git \
-          flutter
-
-
-
-    - name: Sync Engine
-      run: |
-
-        cd flutter
-
-        ENGINE=$(cat bin/internal/engine.version)
-
-        echo "Engine=$ENGINE"
-
-
-        git clone \
-          --depth=1 \
-          https://github.com/flutter/engine.git \
-          engine
-
-
-        cd engine
-
-
-        git fetch origin $ENGINE
-
-        git checkout $ENGINE
-
-
-        gclient config \
-          --name src/flutter \
-          https://github.com/flutter/engine.git
-
-
-        gclient sync \
-          --no-history
-
-
-
-    - name: Build Android Engine
-      run: |
-
-        cd flutter/engine/src
-
-
-        for MODE in release # profile
-        do
-
-          echo "=============================="
-          echo "MODE=$MODE"
-          echo "=============================="
-
-
-          OUT="out/${{matrix.target}}-$MODE"
-
-
-          rm -rf $OUT
-
-
-
-          ./flutter/tools/gn \
-            --runtime-mode $MODE \
-            --target-os android \
-            --android-cpu ${{matrix.abi}} \
-            --target-cpu arm64 \
-            --no-goma \
-            --no-enable-unittests \
-            --build-engine-artifacts \
-            --out-dir $OUT
-
-
-
-          ninja \
-            -C $OUT \
-            flutter.jar \
-            gen_snapshot \
-            -j$(nproc)
-
-
-
-          ART="artifact/${{matrix.target}}-$MODE"
-
-
-          mkdir -p \
-            $ART/linux-arm64
-
-
-
-          cp \
-            $OUT/flutter.jar \
-            $ART/
-
-
-          cp \
-            $OUT/gen_snapshot \
-            $ART/linux-arm64/
-
-
-
-          chmod +x \
-            $ART/linux-arm64/gen_snapshot
-
-
-
-          echo "VERIFY"
-
-          file \
-            $ART/linux-arm64/gen_snapshot
-
-
-        done
-
-
-
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-
-      with:
-
-        name: engine-${{matrix.target}}
-
-        path:
-
-          flutter/engine/src/artifact/
-
-        retention-days: 1
-
-
-
-# =========================================================
-# Assemble SDK
-# =========================================================
-
-
-  assemble:
-
-    needs:
-      - build-engine
-
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@v4
+        with:
+          root-reserve-mb: 1024
+          swap-size-mb: 8192
+          remove-dotnet: true
+          remove-haskell: true
+          remove-android: true
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y git ninja-build clang python3 python-is-python3 curl unzip zip xz-utils file tree
+      - name: Install depot_tools
+        run: |
+          git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          echo "$PWD/depot_tools" >> "$GITHUB_PATH"
+      - name: Clone Flutter
+        run: |
+          git clone -b stable https://github.com/flutter/flutter.git flutter
+          cd flutter
+          git rev-parse HEAD
+          cat bin/internal/engine.version
+      - name: Sync Engine
+        run: |
+          export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
+          cd flutter
+          cp engine/scripts/standard.gclient .gclient
+          gclient sync --no-history
+          gclient runhooks
+          test -f engine/src/flutter/tools/gn
+          test -d engine/src/flutter/third_party/dart/third_party/pkg/webdev/frontend_server_client
+      - name: Build Engine
+        run: |
+          set -e
+          cd flutter/engine/src
+          rm -rf ../../artifacts
+          mkdir -p ../../artifacts
+          if [ "${{matrix.os}}" = "android" ]; then
+            for MODE in profile release; do
+              echo "BUILD android-${{matrix.cpu}}-$MODE"
+              rm -rf out
+              ./flutter/tools/gn \
+                --runtime-mode $MODE \
+                --target-os android \
+                --android-cpu ${{matrix.cpu}} \
+                --no-goma \
+                --no-enable-unittests \
+                --build-engine-artifacts
+              OUT=$(find out -name build.ninja -printf '%h\n' | head -1)
+              ninja -C "$OUT" flutter.jar gen_snapshot -j$(nproc)
+              ART="../../artifacts/android-${{matrix.cpu}}-$MODE"
+              mkdir -p "$ART/linux-arm64"
+              cp "$OUT/flutter.jar" "$ART/"
+              cp "$OUT/gen_snapshot" "$ART/linux-arm64/"
+              chmod +x "$ART/linux-arm64/gen_snapshot"
+            done
+          else
+            for MODE in profile release; do
+              echo "BUILD linux-arm64-$MODE"
+              rm -rf out
+              ./flutter/tools/gn \
+                --target-os linux \
+                --linux-cpu arm64 \
+                --runtime-mode $MODE \
+                --no-goma \
+                --no-enable-unittests \
+                --build-engine-artifacts
+              OUT=$(find out -name build.ninja -printf '%h\n' | head -1)
+              ninja -C "$OUT" gen_snapshot -j$(nproc)
+              ART="../../artifacts/linux-arm64-$MODE"
+              mkdir -p "$ART"
+              cp "$OUT/gen_snapshot" "$ART/"
+              chmod +x "$ART/gen_snapshot"
+            done
+          fi
+          tree ../../artifacts
+      - name: Upload Engine
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-${{matrix.target}}
+          path: flutter/artifacts/
+          if-no-files-found: error
+          retention-days: 1
+
+  assemble-sdk:
+    needs: build-engine
     runs-on: ubuntu-latest
-
-
     steps:
-
-
-    - name: Download artifacts
-      uses: actions/download-artifact@v4
-
-      with:
-
-        path: engine-artifacts
-
-
-
-    - name: Clone Flutter SDK
-      run: |
-
-        git clone \
-          --depth=1 \
-          -b stable \
-          https://github.com/flutter/flutter.git \
-          flutter-sdk
-
-
-
-    - name: Inject Engine
-      run: |
-
-        ENGINE_DIR=
-
-        flutter-sdk/bin/cache/artifacts/engine
-
-
-
-        rm -rf $ENGINE_DIR
-
-        mkdir -p $ENGINE_DIR
-
-
-
-        find engine-artifacts \
-          -type d \
-          -mindepth 2 \
-          -maxdepth 2 \
-          -exec cp -a {} $ENGINE_DIR/ \;
-
-
-
-        echo "ENGINE CACHE"
-
-        tree $ENGINE_DIR
-
-
-
-    - name: Install Dart ARM64 SDK
-      run: |
-
-        cd flutter-sdk
-
-
-        ENGINE=$(cat bin/internal/engine.version)
-
-
-        curl -L \
-          https://storage.googleapis.com/flutter_infra_release/flutter/$ENGINE/dart-sdk-linux-arm64.zip \
-          -o dart.zip
-
-
-
-        rm -rf bin/cache/dart-sdk
-
-
-        unzip -q \
-          dart.zip \
-          -d bin/cache
-
-
-
-        rm dart.zip
-
-
-
-    - name: Fix permissions
-      run: |
-
-        chmod +x \
-          flutter-sdk/bin/flutter
-
-
-
-        chmod +x \
-          flutter-sdk/bin/cache/dart-sdk/bin/*
-
-
-
-        find \
-          flutter-sdk/bin/cache/artifacts/engine \
-          -name gen_snapshot \
-          -exec chmod +x {} \;
-
-
-
-    - name: Verify
-      run: |
-
-
-        find \
-          flutter-sdk/bin/cache/artifacts/engine \
-          -name gen_snapshot \
-          -exec file {} \;
-
-
-
-        file \
-          flutter-sdk/bin/cache/dart-sdk/bin/dart
-
-
-
-    - name: Package
-      run: |
-
-        tar -cJf \
-          flutter-linux-arm64.tar.xz \
-          flutter-sdk
-
-
-
-    - name: Release
-      env:
-
-        GH_TOKEN:
-          ${{secrets.GITHUB_TOKEN}}
-
-      run: |
-
-
-        DATE=$(date -u +"%Y-%m-%d")
-
-        TAG="${DATE}-daily-build"
-
-
-
-        gh release delete \
-          $TAG \
-          --yes \
-          --cleanup-tag || true
-
-
-
-        gh release create \
-          $TAG \
-          flutter-linux-arm64.tar.xz \
-          --title \
-          "Flutter Linux ARM64 SDK $DATE" \
-          --notes \
-          "Self built Flutter SDK Linux ARM64 host." \
-          --latest
+      - name: Install tools
+        run: |
+          sudo apt update
+          sudo apt install -y curl unzip xz-utils file tree
+      - name: Download Engine
+        uses: actions/download-artifact@v4
+        with:
+          pattern: engine-*
+          path: artifacts
+          merge-multiple: true
+      - name: Clone Flutter SDK
+        run: |
+          git clone -b stable https://github.com/flutter/flutter.git flutter-sdk
+      - name: Inject Engine
+        run: |
+          set -e
+          ENGINE_DIR=flutter-sdk/bin/cache/artifacts/engine
+          rm -rf "$ENGINE_DIR"
+          mkdir -p "$ENGINE_DIR"
+          cp -a artifacts/. "$ENGINE_DIR/"
+          tree "$ENGINE_DIR"
+      - name: Install Dart ARM64 SDK
+        run: |
+          set -e
+          ENGINE=$(cat flutter-sdk/bin/internal/engine.version)
+          curl -fL "https://storage.googleapis.com/flutter_infra_release/flutter/${ENGINE}/dart-sdk-linux-arm64.zip" -o dart.zip
+          rm -rf flutter-sdk/bin/cache/dart-sdk
+          unzip -q dart.zip -d flutter-sdk/bin/cache
+          rm dart.zip
+          [ -d flutter-sdk/bin/cache/dart-sdk ] || mv flutter-sdk/bin/cache/dart-sdk-* flutter-sdk/bin/cache/dart-sdk
+      - name: Fix permissions
+        run: |
+          chmod +x flutter-sdk/bin/flutter
+          find flutter-sdk/bin/cache/dart-sdk/bin -type f -exec chmod +x {} \;
+          find flutter-sdk/bin/cache/artifacts/engine -name gen_snapshot -exec chmod +x {} \;
+      - name: Verify
+        run: |
+          file flutter-sdk/bin/cache/dart-sdk/bin/dart
+          find flutter-sdk/bin/cache/artifacts/engine -name gen_snapshot -exec file {} \;
+      - name: Package
+        run: |
+          tar -cJf flutter-linux-arm64.tar.xz flutter-sdk
+      - name: Upload SDK
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-linux-arm64-full-sdk
+          path: flutter-linux-arm64.tar.xz
+          if-no-files-found: error
+
+  release:
+    needs: assemble-sdk
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download SDK
+        uses: actions/download-artifact@v4
+        with:
+          name: flutter-linux-arm64-full-sdk
+      - name: Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DATE="$(date -u +'%Y-%m-%d')"
+          TAG="${DATE}-daily-build"
+          gh release delete "$TAG" --yes --cleanup-tag || true
+          gh release create "$TAG" flutter-linux-arm64.tar.xz \
+            --title "Flutter SDK (Linux ARM64 Out-of-Box) - $DATE" \
+            --notes "Daily Flutter Engine build." \
+            --latest
