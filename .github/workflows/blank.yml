@@ -53,32 +53,41 @@ jobs:
             zip unzip tree file xz-utils curl \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-      # 1. 安装 depot_tools 并配置环境变量
+      # 1. 安装 depot_tools 并配置 PATH
       - name: Install depot_tools
         run: |
           git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
           echo "$PWD/depot_tools" >> $GITHUB_PATH
 
-      # 2. 全量克隆 Mono-repo 并正确配置 gclient 环境
+      # 2. 克隆 Mono-repo 并正确初始化 gclient
       - name: Checkout Flutter Mono-repo & Init gclient
         run: |
           git clone -b stable https://github.com/flutter/flutter.git flutter-mono
           
-          # 【修补】在 engine/src 同级目录生成 .gclient 引导配置文件
-          cd flutter-mono/engine
+          # 在根目录配置 gclient
           gclient config --name=src/flutter https://github.com/flutter/flutter.git
           
-          # 补全引擎内部第三方的抽象依赖（如 Skia 工具链等）
           export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
           gclient sync --nohooks --no-history
 
-      # 3. 编译 Engine 碎片
+      # 3. 动态寻找 GN 路径并编译 Engine 碎片
       - name: Build Engine Artifacts
         run: |
           export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
 
-          cd flutter-mono/engine/src
-          EXPORT_DIR="export-${{ matrix.target }}"
+          # 自动精确定位包含 gn 脚本的目录
+          GN_PATH=$(find . -path "*/tools/gn" | head -n 1)
+          if [ -z "$GN_PATH" ]; then
+            echo "ERROR: Could not find tools/gn script!"
+            exit 1
+          fi
+
+          # 进入 tools/ 所在父目录 (即 flutter/ 源码根目录)
+          ENGINE_SRC_DIR=$(dirname $(dirname "$GN_PATH"))
+          cd "$ENGINE_SRC_DIR/.."
+          
+          echo "Engine Root Directory: $PWD"
+          EXPORT_DIR="$PWD/export-${{ matrix.target }}"
 
           build_mode() {
             MODE=$1
@@ -130,7 +139,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: engine-artifact-${{ matrix.target }}
-          path: flutter-mono/engine/src/export-${{ matrix.target }}/
+          path: export-${{ matrix.target }}/
           retention-days: 1
 
   # =========================================================
