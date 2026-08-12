@@ -37,11 +37,13 @@
 #       gn --android --android-cpu <abi> --runtime-mode <mode>
 #       ninja gen_snapshot        (arm64-HOST binary that emits <abi> AOT code)
 #     and place it at android-<abi>-<mode>/linux-arm64/gen_snapshot.
-#   * Assemble a stock stable SDK on arm64: `flutter precache --android` pulls
-#     the host-independent pieces (flutter.jar, dart-sdk-linux-arm64, host
-#     engine) and writes the cache stamps; then inject the 6 self-built
-#     arm64 gen_snapshots. libflutter.so for the APK still comes from the
-#     Maven AAR at gradle time, exactly like a normal build.
+#   * Assemble a stock stable SDK on arm64: `flutter precache` pulls
+#     dart-sdk-linux-arm64, common patched SDK, host engine tools, and the
+#     official Android flutter.jar artifacts for arm/arm64/x64 in all modes.
+#     Then inject the six source-built arm64 gen_snapshots.
+#   * Package the populated cache together with the pinned Flutter checkout as
+#     one Linux ARM64 offline SDK archive. The workflow does not build an app;
+#     its only deliverable is the ready-to-extract SDK.
 
 name: Flutter SDK (Linux ARM64) Daily Build
 
@@ -125,7 +127,6 @@ jobs:
           git checkout "${{ needs.resolve.outputs.sha }}"
           echo "Flutter: $(git rev-parse HEAD)"
           echo "Engine : $(cat bin/internal/engine.version)"
-          rm -rf .git                              # not needed to build; saves space
           # standard.gclient uses solution name "." ; on an arm64 host
           # download_android_deps defaults to false, so no NDK/SDK is fetched.
           cp engine/scripts/standard.gclient .gclient
@@ -153,7 +154,7 @@ jobs:
               --no-enable-unittests \
               --build-engine-artifacts
 
-            OUT=$(find out -name build.ninja -printf '%h\n' | head -1)
+            OUT=$(find out -name build.ninja -printf '%h\n' -quit)
             echo "out dir: $OUT"
 
             # On an arm64 host the host toolchain lives in clang_arm64/.
@@ -161,8 +162,8 @@ jobs:
             ninja -C "$OUT" clang_arm64/gen_snapshot -j"$(nproc)" \
               || ninja -C "$OUT" gen_snapshot -j"$(nproc)"
 
-            GEN=$(find "$OUT" -type f -name gen_snapshot -path "*clang_arm64*" | head -1)
-            [ -z "$GEN" ] && GEN=$(find "$OUT" -type f -name gen_snapshot | head -1)
+            GEN=$(find "$OUT" -type f -name gen_snapshot -path "*clang_arm64*" -print -quit)
+            [ -z "$GEN" ] && GEN=$(find "$OUT" -type f -name gen_snapshot -print -quit)
             echo "found: $GEN"
             file "$GEN"
             # Guard: it MUST be an aarch64 host binary, not x64 / not android.
@@ -208,7 +209,7 @@ jobs:
           path: gensnapshots
           merge-multiple: true
 
-      - name: Show gen_snapshots
+      - name: Show source-built gen_snapshots
         run: tree gensnapshots
 
       - name: Checkout Flutter SDK (pinned)
@@ -219,23 +220,38 @@ jobs:
           git checkout "${{ needs.resolve.outputs.sha }}"
           echo "SDK Flutter: $(git rev-parse HEAD)"
 
-      - name: Bootstrap SDK + precache host-independent artifacts
+      - name: Bootstrap ARM64 SDK
         run: |
           set -euo pipefail
           export PATH="$PWD/flutter-sdk/bin:$PATH"
           # arm64 host => downloads dart-sdk-linux-arm64 + builds the tool.
           flutter --version
-          # Pulls flutter.jar + host engine + (x64) android gen_snapshot AND
-          # writes the cache stamps so the target device won't try to
-          # re-download the (nonexistent) arm64 android artifacts.
-          flutter precache --android --universal
+
+      - name: Pull official Android flutter.jar artifacts
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/flutter-sdk/bin:$PATH"
+          # android_internal_build downloads and extracts the official
+          # artifacts.zip files into:
+          #   android-arm{,-profile,-release}/flutter.jar
+          #   android-arm64{,-profile,-release}/flutter.jar
+          #   android-x64{,-profile,-release}/flutter.jar
+          # It also writes the matching engine-revision cache stamp.
+          #
+          # android_gen_snapshot retains the official linux-x64 directories
+          # expected by the current stable cache checker. The source-built
+          # linux-arm64 binaries are injected in the next step.
+          flutter precache \
+            --universal \
+            --android_internal_build \
+            --android_gen_snapshot
 
       - name: Inject arm64 Android gen_snapshots
         run: |
           set -euo pipefail
           ENGINE_DIR="flutter-sdk/bin/cache/artifacts/engine"
-          # Merge android-<abi>-<mode>/linux-arm64/gen_snapshot next to the
-          # linux-x64/ dirs that precache just created.
+          # Add android-<abi>-<mode>/linux-arm64/gen_snapshot beside the
+          # official target-side flutter.jar and linux-x64 host artifacts.
           cp -a gensnapshots/. "$ENGINE_DIR"/
           find "$ENGINE_DIR" -type f -name gen_snapshot -path "*linux-arm64*" \
             -exec chmod +x {} \;
@@ -245,8 +261,33 @@ jobs:
       - name: Verify SDK
         run: |
           set -euo pipefail
+          ENGINE_DIR="flutter-sdk/bin/cache/artifacts/engine"
           echo "--- dart (must be ARM aarch64) ---"
-          file flutter-sdk/bin/cache/dart-sdk/bin/dart
+          DART="flutter-sdk/bin/cache/dart-sdk/bin/dart"
+          test -x "$DART"
+          file "$DART" | tee /dev/stderr | grep -q "ARM aarch64"
+
+          echo "--- complete ARM64 host toolchain ---"
+          for f in flutter_tester impellerc; do
+            p="$ENGINE_DIR/linux-arm64/$f"
+            test -x "$p"
+            file "$p" | tee /dev/stderr | grep -q "ARM aarch64"
+          done
+          test -f "$ENGINE_DIR/linux-arm64/frontend_server_aot.dart.snapshot"
+          test -d "$ENGINE_DIR/linux-arm64/shader_lib"
+          test -f "$ENGINE_DIR/common/flutter_patched_sdk/platform_strong.dill"
+          test -f "$ENGINE_DIR/common/flutter_patched_sdk_product/platform_strong.dill"
+
+          echo "--- complete Android engine cache ---"
+          for dir in \
+            android-arm android-arm-profile android-arm-release \
+            android-arm64 android-arm64-profile android-arm64-release \
+            android-x64 android-x64-profile android-x64-release; do
+            test -s "$ENGINE_DIR/$dir/flutter.jar"
+            unzip -tqq "$ENGINE_DIR/$dir/flutter.jar"
+            sha256sum "$ENGINE_DIR/$dir/flutter.jar"
+          done
+
           echo "--- android gen_snapshots (must all be ARM aarch64) ---"
           n=0
           while IFS= read -r f; do
@@ -254,28 +295,39 @@ jobs:
             file "$f" | grep -q "ARM aarch64" \
               || { echo "FATAL: $f is not arm64"; exit 1; }
             n=$((n+1))
-          done < <(find flutter-sdk/bin/cache/artifacts/engine \
+          done < <(find "$ENGINE_DIR" \
                      -type f -name gen_snapshot -path "*linux-arm64*")
           echo "verified $n arm64 gen_snapshot binaries"
           # arm x arm64 x x64  X  profile x release = 6 expected
           [ "$n" -eq 6 ] || { echo "FATAL: expected 6, got $n"; exit 1; }
 
+          # Final SDK command is run before packaging, after all injection.
+          flutter-sdk/bin/flutter --version
+
       - name: Package SDK
         run: |
           set -euo pipefail
-          tar -cJf flutter-linux-arm64.tar.xz flutter-sdk
-          ls -lh flutter-linux-arm64.tar.xz
+          cat > flutter-sdk/OFFLINE-SDK-MANIFEST.txt <<EOF
+          Flutter Linux ARM64 offline SDK
+          Flutter commit: ${{ needs.resolve.outputs.sha }}
+          Engine commit:  ${{ needs.resolve.outputs.engine }}
+          Host:           linux-arm64
+          Android Engine: official arm, arm64, x64 flutter.jar (debug/profile/release)
+          Android AOT:    arm, arm64, x64 (profile + release)
+          EOF
+          tar -cJf flutter-linux-arm64-offline-sdk.tar.xz flutter-sdk
+          ls -lh flutter-linux-arm64-offline-sdk.tar.xz
 
       - name: Upload SDK
         uses: actions/upload-artifact@v4
         with:
-          name: flutter-linux-arm64-full-sdk
-          path: flutter-linux-arm64.tar.xz
+          name: flutter-linux-arm64-offline-sdk
+          path: flutter-linux-arm64-offline-sdk.tar.xz
           if-no-files-found: error
           retention-days: 7
 
   # =========================================================
-  # Release
+  # Publish the Linux ARM64 offline Flutter SDK
   # =========================================================
   release:
     name: Create GitHub Release
@@ -286,13 +338,13 @@ jobs:
       - name: Download SDK Artifact
         uses: actions/download-artifact@v4
         with:
-          name: flutter-linux-arm64-full-sdk
+          name: flutter-linux-arm64-offline-sdk
 
       - name: Verify Package
         run: |
           set -euo pipefail
           ls -lh
-          test -f flutter-linux-arm64.tar.xz
+          test -f flutter-linux-arm64-offline-sdk.tar.xz
 
       - name: Generate Release Tag
         id: date
@@ -311,7 +363,7 @@ jobs:
           DATE="${{ steps.date.outputs.date }}"
           gh release delete "$TAG" --yes --cleanup-tag || true
           gh release create "$TAG" \
-            flutter-linux-arm64.tar.xz \
-            --title "Flutter SDK (Linux ARM64, Android AOT ready) - $DATE" \
-            --notes "Out-of-the-box Flutter SDK for linux-arm64 hosts. Includes self-built Android gen_snapshot (arm/arm64/x64, profile+release) so 'flutter build apk --release' works on arm64 Linux (Termux proot, etc.)." \
+            flutter-linux-arm64-offline-sdk.tar.xz \
+            --title "Flutter Offline SDK (Linux ARM64) - $DATE" \
+            --notes "Complete pre-cached Flutter SDK for Linux ARM64. Includes official Android arm/arm64/x64 flutter.jar artifacts for debug/profile/release and source-built ARM64-host gen_snapshot binaries for profile/release." \
             --latest
