@@ -154,6 +154,9 @@ jobs:
           set -euo pipefail
           export PATH="$PWD/flutter-sdk/bin:$PATH"
           flutter --version
+          # flutter --version bootstraps Dart and flutter_tools only.
+          # Populate common patched SDK files and Linux ARM64 host tools.
+          flutter precache --universal
 
       - name: Pull official Android Engine artifacts
         env:
@@ -232,13 +235,18 @@ jobs:
 
           for TOOL in flutter_tester impellerc; do
             BIN="$ENGINE_DIR/linux-arm64/$TOOL"
-            test -x "$BIN"
+            test -x "$BIN" \
+              || { echo "FATAL: ARM64 host tool missing: $BIN"; exit 1; }
             file "$BIN" | tee /dev/stderr | grep -q "ARM aarch64"
           done
-          test -f "$ENGINE_DIR/linux-arm64/frontend_server_aot.dart.snapshot"
-          test -d "$ENGINE_DIR/linux-arm64/shader_lib"
-          test -f "$ENGINE_DIR/common/flutter_patched_sdk/platform_strong.dill"
-          test -f "$ENGINE_DIR/common/flutter_patched_sdk_product/platform_strong.dill"
+          test -f "$ENGINE_DIR/linux-arm64/frontend_server_aot.dart.snapshot" \
+            || { echo "FATAL: frontend_server snapshot missing"; exit 1; }
+          test -d "$ENGINE_DIR/linux-arm64/shader_lib" \
+            || { echo "FATAL: shader_lib missing"; exit 1; }
+          test -f "$ENGINE_DIR/common/flutter_patched_sdk/platform_strong.dill" \
+            || { echo "FATAL: flutter_patched_sdk missing"; exit 1; }
+          test -f "$ENGINE_DIR/common/flutter_patched_sdk_product/platform_strong.dill" \
+            || { echo "FATAL: flutter_patched_sdk_product missing"; exit 1; }
 
           for DIR in \
             android-arm android-arm-profile android-arm-release \
