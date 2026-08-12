@@ -2,7 +2,6 @@ name: Flutter Engine Daily Build
 
 on:
   workflow_dispatch:
-
   schedule:
     - cron: "00 16 * * *"
 
@@ -10,39 +9,24 @@ permissions:
   contents: write
 
 jobs:
-
-  # ============================================================
-  # Job 1: Build Flutter Engine
-  # ============================================================
-
   build-engine:
     name: Build ${{ matrix.target }}
     runs-on: ubuntu-latest
-
     strategy:
       fail-fast: false
-
       matrix:
         include:
-
           - target: android-arm64
             os: android
             cpu: arm64
-
           - target: android-x64
             os: android
             cpu: x64
-
           - target: linux-arm64
             os: linux
             cpu: arm64
 
     steps:
-
-      # ----------------------------------------------------------
-      # Free disk space
-      # ----------------------------------------------------------
-
       - name: Maximize build space
         uses: easimon/maximize-build-space@v4
         with:
@@ -52,14 +36,9 @@ jobs:
           remove-haskell: true
           remove-android: true
 
-      # ----------------------------------------------------------
-      # Dependencies
-      # ----------------------------------------------------------
-
       - name: Install dependencies
         run: |
           sudo apt-get update
-
           sudo apt-get install -y \
             git \
             ninja-build \
@@ -73,225 +52,88 @@ jobs:
             file \
             tree
 
-      # ----------------------------------------------------------
-      # depot_tools
-      # ----------------------------------------------------------
-
       - name: Install depot_tools
         run: |
           git clone --depth=1 \
-            https://chromium.googlesource.com/chromium/tools/depot_tools.git \
-            "$GITHUB_WORKSPACE/depot_tools"
+            https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          echo "$PWD/depot_tools" >> "$GITHUB_PATH"
 
-          echo "$GITHUB_WORKSPACE/depot_tools" >> "$GITHUB_PATH"
-
-          export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
-
-          echo "gclient:"
-          which gclient
-
-          echo "ninja:"
-          which ninja
-
-      # ----------------------------------------------------------
-      # Flutter stable
-      # ----------------------------------------------------------
-
-      - name: Clone Flutter stable
+      - name: Clone Flutter
         run: |
           git clone \
             -b stable \
             https://github.com/flutter/flutter.git \
             flutter
-
           cd flutter
-
-          echo "=========================================="
-          echo "Flutter revision"
-          echo "=========================================="
-
+          echo "Flutter revision:"
           git rev-parse HEAD
-
-          echo ""
-          echo "=========================================="
-          echo "Engine revision"
-          echo "=========================================="
-
+          echo "Engine revision:"
           cat bin/internal/engine.version
 
-      # ----------------------------------------------------------
-      # Engine dependencies
-      #
-      # IMPORTANT:
-      # Do NOT use:
-      #
-      #   gclient config https://github.com/flutter/flutter.git
-      #
-      # Use the Engine standard.gclient.
-      # ----------------------------------------------------------
-
-      - name: Sync Flutter Engine dependencies
-        shell: bash
+      - name: Sync Engine dependencies
         run: |
-          set -e
-
           export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
-
           cd flutter
-
-          echo "=========================================="
-          echo "Preparing Engine gclient configuration"
-          echo "=========================================="
-
-          test -f engine/scripts/standard.gclient
 
           cp engine/scripts/standard.gclient .gclient
 
-          echo ""
           echo "========== .gclient =========="
           cat .gclient
           echo "=============================="
-          echo ""
 
-          echo "=========================================="
-          echo "Running gclient sync"
-          echo "=========================================="
-
-          gclient sync -D
-
-          echo "=========================================="
-          echo "Running gclient hooks"
-          echo "=========================================="
-
+          gclient sync --no-history
           gclient runhooks
 
-      # ----------------------------------------------------------
-      # Verify dependencies BEFORE compiling
-      # ----------------------------------------------------------
-
-      - name: Verify Engine checkout
-        shell: bash
-        run: |
-          set -e
-
-          cd flutter
-
-          echo "=========================================="
-          echo "Checking Engine"
-          echo "=========================================="
-
+          echo "Checking Engine..."
           test -f engine/src/flutter/tools/gn
 
-          echo "GN:"
-          ls -lh engine/src/flutter/tools/gn
-
-          echo ""
-          echo "Checking Dart dependency..."
-
-          test -d \
-            engine/src/flutter/third_party/dart/third_party/pkg/webdev/frontend_server_client
-
-          echo "frontend_server_client: OK"
-
-          echo ""
-          echo "Engine checkout is complete."
-
-      # ----------------------------------------------------------
-      # Build
-      # ----------------------------------------------------------
+          echo "Checking Dart webdev dependency..."
+          test -d engine/src/flutter/third_party/dart/third_party/pkg/webdev/frontend_server_client
 
       - name: Build Engine
         shell: bash
         run: |
           set -e
-
           cd flutter/engine/src
 
           rm -rf ../../artifacts
-
           mkdir -p ../../artifacts
 
-          echo "=========================================="
-          echo "Engine source:"
-          pwd
-          echo "=========================================="
-
-          # ======================================================
-          # Android
-          # ======================================================
-
           if [ "${{ matrix.os }}" = "android" ]; then
-
-            for MODE in profile release
-            do
-
-              echo ""
+            for MODE in profile release; do
               echo "=========================================="
-              echo "BUILD ANDROID"
-              echo "Target : ${{ matrix.cpu }}"
-              echo "Mode   : $MODE"
+              echo "BUILD android-${{ matrix.cpu }} $MODE"
               echo "=========================================="
 
               rm -rf out
 
               ./flutter/tools/gn \
                 --android \
-                --android-cpu ${{ matrix.cpu }} \
+                --android-cpu "${{ matrix.cpu }}" \
                 --runtime-mode "$MODE" \
                 --no-goma \
                 --no-enable-unittests \
                 --build-engine-artifacts
 
-              OUT=$(find out \
-                -name build.ninja \
-                -printf '%h\n' \
-                | head -1)
+              OUT=$(find out -name build.ninja -printf '%h\n' | head -1)
 
-              if [ -z "$OUT" ]; then
-                echo "ERROR: build.ninja not found"
-                exit 1
-              fi
+              test -n "$OUT"
+              test -f "$OUT/build.ninja"
 
-              echo "GN output:"
-              echo "$OUT"
+              ninja -C "$OUT" flutter.jar -j"$(nproc)"
 
-              ninja \
-                -C "$OUT" \
-                flutter.jar \
-                -j"$(nproc)"
+              ART="../../artifacts/android-${{ matrix.cpu }}-$MODE"
+              mkdir -p "$ART"
 
-              ART_DIR="../../artifacts/android-${{ matrix.cpu }}-${MODE}"
+              cp "$OUT/flutter.jar" "$ART/flutter.jar"
 
-              mkdir -p "$ART_DIR"
-
-              if [ ! -f "$OUT/flutter.jar" ]; then
-                echo "ERROR: flutter.jar was not generated"
-                exit 1
-              fi
-
-              cp \
-                "$OUT/flutter.jar" \
-                "$ART_DIR/flutter.jar"
-
-              echo ""
               echo "Generated:"
-              ls -lh "$ART_DIR/flutter.jar"
-
+              file "$ART/flutter.jar"
             done
-
-          # ======================================================
-          # Linux ARM64
-          # ======================================================
-
           else
-
-            for MODE in profile release
-            do
-
-              echo ""
+            for MODE in profile release; do
               echo "=========================================="
-              echo "BUILD LINUX ARM64"
-              echo "Mode: $MODE"
+              echo "BUILD linux-arm64 $MODE"
               echo "=========================================="
 
               rm -rf out
@@ -304,106 +146,45 @@ jobs:
                 --no-enable-unittests \
                 --build-engine-artifacts
 
-              OUT=$(find out \
-                -name build.ninja \
-                -printf '%h\n' \
-                | head -1)
+              OUT=$(find out -name build.ninja -printf '%h\n' | head -1)
 
-              if [ -z "$OUT" ]; then
-                echo "ERROR: build.ninja not found"
-                exit 1
-              fi
+              test -n "$OUT"
+              test -f "$OUT/build.ninja"
 
-              echo "GN output:"
-              echo "$OUT"
+              ninja -C "$OUT" gen_snapshot -j"$(nproc)"
 
-              ninja \
-                -C "$OUT" \
-                gen_snapshot \
-                -j"$(nproc)"
+              ART="../../artifacts/linux-arm64-$MODE"
+              mkdir -p "$ART"
 
-              ART_DIR="../../artifacts/linux-arm64-${MODE}"
+              cp "$OUT/gen_snapshot" "$ART/gen_snapshot"
+              chmod +x "$ART/gen_snapshot"
 
-              mkdir -p "$ART_DIR"
-
-              if [ ! -f "$OUT/gen_snapshot" ]; then
-                echo "ERROR: gen_snapshot was not generated"
-                exit 1
-              fi
-
-              cp \
-                "$OUT/gen_snapshot" \
-                "$ART_DIR/gen_snapshot"
-
-              chmod +x \
-                "$ART_DIR/gen_snapshot"
-
-              echo ""
               echo "Generated:"
-              file "$ART_DIR/gen_snapshot"
-              ls -lh "$ART_DIR/gen_snapshot"
-
+              file "$ART/gen_snapshot"
             done
-
           fi
 
-      # ----------------------------------------------------------
-      # IMPORTANT:
-      # Verify the exact directory that will be uploaded.
-      # ----------------------------------------------------------
+          echo "=========================================="
+          echo "FINAL ARTIFACTS"
+          echo "=========================================="
+          tree ../../artifacts
 
-      - name: Verify generated artifacts
-        shell: bash
+      - name: Verify Engine artifacts
         run: |
           set -e
 
-          echo "=========================================="
-          echo "Artifact directory"
-          echo "=========================================="
+          test -d flutter/artifacts
 
-          pwd
+          COUNT=$(find flutter/artifacts -type f | wc -l)
 
-          echo ""
-          echo "flutter/artifacts:"
-          tree flutter/artifacts
+          echo "Artifact file count: $COUNT"
 
-          echo ""
-          echo "Files:"
-          find flutter/artifacts \
-            -type f \
-            -print \
-            -exec file {} \;
+          if [ "$COUNT" -eq 0 ]; then
+            echo "ERROR: No engine artifacts generated."
+            exit 1
+          fi
 
-          echo ""
-          echo "Checking files..."
-
-          test -n "$(find flutter/artifacts -type f -print -quit)"
-
-          case "${{ matrix.target }}" in
-
-            android-arm64)
-              test -f flutter/artifacts/android-arm64-profile/flutter.jar
-              test -f flutter/artifacts/android-arm64-release/flutter.jar
-              ;;
-
-            android-x64)
-              test -f flutter/artifacts/android-x64-profile/flutter.jar
-              test -f flutter/artifacts/android-x64-release/flutter.jar
-              ;;
-
-            linux-arm64)
-              test -f flutter/artifacts/linux-arm64-profile/gen_snapshot
-              test -f flutter/artifacts/linux-arm64-release/gen_snapshot
-              ;;
-
-          esac
-
-          echo ""
-          echo "ALL ARTIFACT CHECKS PASSED."
-
-      # ----------------------------------------------------------
-      # Upload
-      # ----------------------------------------------------------
+          find flutter/artifacts -type f -exec file {} \;
 
       - name: Upload Engine artifacts
         uses: actions/upload-artifact@v4
@@ -411,12 +192,7 @@ jobs:
           name: engine-${{ matrix.target }}
           path: flutter/artifacts/
           if-no-files-found: error
-          retention-days: 7
-
-
-  # ============================================================
-  # Job 2: Assemble ARM64 Flutter SDK
-  # ============================================================
+          retention-days: 1
 
   assemble-sdk:
     name: Assemble Flutter Linux ARM64 SDK
@@ -424,26 +200,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
-      # ----------------------------------------------------------
-      # Dependencies
-      # ----------------------------------------------------------
-
       - name: Install dependencies
         run: |
           sudo apt-get update
-
           sudo apt-get install -y \
-            git \
             curl \
             unzip \
             xz-utils \
             file \
             tree
-
-      # ----------------------------------------------------------
-      # Download all Engine artifacts
-      # ----------------------------------------------------------
 
       - name: Download Engine artifacts
         uses: actions/download-artifact@v4
@@ -452,31 +217,12 @@ jobs:
           path: artifacts
           merge-multiple: false
 
-      # ----------------------------------------------------------
-      # Inspect downloaded artifacts
-      # ----------------------------------------------------------
-
-      - name: Verify downloaded artifacts
-        shell: bash
+      - name: Show downloaded artifacts
         run: |
-          set -e
-
           echo "=========================================="
-          echo "Downloaded artifacts"
+          echo "DOWNLOADED ARTIFACTS"
           echo "=========================================="
-
           tree artifacts
-
-          echo ""
-          echo "Files:"
-          find artifacts \
-            -type f \
-            -print \
-            -exec file {} \;
-
-      # ----------------------------------------------------------
-      # Clone matching Flutter stable SDK
-      # ----------------------------------------------------------
 
       - name: Clone Flutter SDK
         run: |
@@ -485,135 +231,99 @@ jobs:
             https://github.com/flutter/flutter.git \
             flutter-sdk
 
-          cd flutter-sdk
-
-          echo "Flutter revision:"
-          git rev-parse HEAD
-
-          echo ""
-          echo "Engine revision:"
-          cat bin/internal/engine.version
-
-      # ----------------------------------------------------------
-      # Inject Engine artifacts
-      #
-      # Keep the directory structure.
-      #
-      # artifacts/
-      # ├── engine-android-arm64/
-      # │   ├── android-arm64-profile/
-      # │   │   └── flutter.jar
-      # │   └── android-arm64-release/
-      # │       └── flutter.jar
-      # ├── engine-android-x64/
-      # │   ├── android-x64-profile/
-      # │   │   └── flutter.jar
-      # │   └── android-x64-release/
-      # │       └── flutter.jar
-      # └── engine-linux-arm64/
-      #     ├── linux-arm64-profile/
-      #     │   └── gen_snapshot
-      #     └── linux-arm64-release/
-      #         └── gen_snapshot
-      #
-      # becomes:
-      #
-      # bin/cache/artifacts/engine/
-      # ├── android-arm64-profile/
-      # ├── android-arm64-release/
-      # ├── android-x64-profile/
-      # ├── android-x64-release/
-      # ├── linux-arm64-profile/
-      # └── linux-arm64-release/
-      # ----------------------------------------------------------
-
       - name: Inject Engine artifacts
-        shell: bash
         run: |
           set -e
 
           ENGINE_DIR="flutter-sdk/bin/cache/artifacts/engine"
 
           rm -rf "$ENGINE_DIR"
-
           mkdir -p "$ENGINE_DIR"
 
           echo "=========================================="
           echo "Injecting Engine artifacts"
           echo "=========================================="
 
-          for TARGET_DIR in artifacts/engine-*/
-          do
+          for TARGET_DIR in artifacts/engine-*; do
+            [ -d "$TARGET_DIR" ] || continue
 
-            if [ ! -d "$TARGET_DIR" ]; then
-              continue
-            fi
+            echo "Injecting: $TARGET_DIR"
 
-            echo ""
-            echo "Injecting:"
-            echo "$TARGET_DIR"
-
-            cp -a \
-              "$TARGET_DIR"/. \
-              "$ENGINE_DIR"/
-
+            cp -a "$TARGET_DIR"/. "$ENGINE_DIR"/
           done
 
-          echo ""
-          echo "Final Engine directory:"
+          echo "=========================================="
+          echo "ENGINE CACHE"
+          echo "=========================================="
+
           tree "$ENGINE_DIR"
 
-      # ----------------------------------------------------------
-      # Download ARM64 Dart SDK matching Engine revision
-      # ----------------------------------------------------------
-
-      - name: Install Linux ARM64 Dart SDK
-        shell: bash
+      - name: Verify Engine cache
         run: |
           set -e
 
-          cd flutter-sdk
+          ENGINE_DIR="flutter-sdk/bin/cache/artifacts/engine"
 
-          ENGINE_COMMIT=$(cat bin/internal/engine.version)
+          test -d "$ENGINE_DIR"
 
-          echo "=========================================="
-          echo "Engine revision"
-          echo "$ENGINE_COMMIT"
-          echo "=========================================="
-
-          DART_URL="https://storage.googleapis.com/flutter_infra_release/flutter/${ENGINE_COMMIT}/dart-sdk-linux-arm64.zip"
-
-          echo "Dart SDK:"
-          echo "$DART_URL"
-
-          curl \
-            --fail \
-            --show-error \
-            --location \
-            --retry 5 \
-            --retry-delay 5 \
-            "$DART_URL" \
-            -o /tmp/dart-sdk-linux-arm64.zip
-
-          rm -rf bin/cache/dart-sdk
-
-          unzip -q \
-            /tmp/dart-sdk-linux-arm64.zip \
-            -d bin/cache
-
-          rm -f /tmp/dart-sdk-linux-arm64.zip
-
-          test -x bin/cache/dart-sdk/bin/dart
+          echo "Android artifacts:"
+          find "$ENGINE_DIR" \
+            -path '*android-*' \
+            -type f \
+            -exec file {} \;
 
           echo ""
-          echo "Dart:"
-          file bin/cache/dart-sdk/bin/dart
+          echo "Linux ARM64 artifacts:"
+          find "$ENGINE_DIR" \
+            -path '*linux-arm64*' \
+            -type f \
+            -exec file {} \;
 
-      # ----------------------------------------------------------
-      # engine.stamp
-      # ----------------------------------------------------------
+          test -f "$ENGINE_DIR/android-arm64-profile/flutter.jar"
+          test -f "$ENGINE_DIR/android-arm64-release/flutter.jar"
+          test -f "$ENGINE_DIR/android-x64-profile/flutter.jar"
+          test -f "$ENGINE_DIR/android-x64-release/flutter.jar"
+          test -f "$ENGINE_DIR/linux-arm64-profile/gen_snapshot"
+          test -f "$ENGINE_DIR/linux-arm64-release/gen_snapshot"
 
-      - name: Write engine stamp
+      - name: Install native Linux ARM64 Dart SDK
+        run: |
+          set -e
+
+          ENGINE_COMMIT=$(cat flutter-sdk/bin/internal/engine.version)
+
+          echo "Engine revision: $ENGINE_COMMIT"
+
+          URL="https://storage.googleapis.com/flutter_infra_release/flutter/${ENGINE_COMMIT}/dart-sdk-linux-arm64.zip"
+
+          echo "Downloading:"
+          echo "$URL"
+
+          curl -fL "$URL" -o dart-sdk-arm64.zip
+
+          rm -rf flutter-sdk/bin/cache/dart-sdk
+
+          unzip -q dart-sdk-arm64.zip \
+            -d flutter-sdk/bin/cache
+
+          rm dart-sdk-arm64.zip
+
+          if [ -d "flutter-sdk/bin/cache/dart-sdk" ]; then
+            echo "Dart SDK extracted directly."
+          else
+            DART_DIR=$(find flutter-sdk/bin/cache \
+              -maxdepth 1 \
+              -type d \
+              -name 'dart-sdk*' \
+              | head -1)
+
+            test -n "$DART_DIR"
+
+            mv "$DART_DIR" \
+              flutter-sdk/bin/cache/dart-sdk
+          fi
+
+      - name: Write engine stamp and fix permissions
         run: |
           set -e
 
@@ -622,54 +332,29 @@ jobs:
           echo "$ENGINE_COMMIT" \
             > flutter-sdk/bin/cache/engine.stamp
 
-          echo "engine.stamp:"
-          cat flutter-sdk/bin/cache/engine.stamp
-
-      # ----------------------------------------------------------
-      # Permissions
-      # ----------------------------------------------------------
-
-      - name: Fix executable permissions
-        run: |
-          set -e
-
-          chmod +x \
-            flutter-sdk/bin/flutter
+          chmod +x flutter-sdk/bin/flutter
 
           find flutter-sdk/bin/cache/dart-sdk/bin \
             -type f \
             -exec chmod +x {} \;
 
           find flutter-sdk/bin/cache/artifacts/engine \
-            -type f \
             -name gen_snapshot \
             -exec chmod +x {} \;
 
-      # ----------------------------------------------------------
-      # Verify final SDK
-      # ----------------------------------------------------------
-
-      - name: Verify final SDK
-        shell: bash
+      - name: Verify SDK
         run: |
           set -e
 
           echo "=========================================="
-          echo "Flutter SDK"
-          echo "=========================================="
-
-          tree flutter-sdk/bin/cache/artifacts/engine
-
-          echo ""
-          echo "=========================================="
-          echo "Dart"
+          echo "DART"
           echo "=========================================="
 
           file flutter-sdk/bin/cache/dart-sdk/bin/dart
 
           echo ""
           echo "=========================================="
-          echo "gen_snapshot"
+          echo "GEN SNAPSHOT"
           echo "=========================================="
 
           find flutter-sdk/bin/cache/artifacts/engine \
@@ -678,68 +363,20 @@ jobs:
 
           echo ""
           echo "=========================================="
-          echo "Required files"
+          echo "SDK TREE"
           echo "=========================================="
 
-          test -f \
-            flutter-sdk/bin/cache/artifacts/engine/android-arm64-profile/flutter.jar
-
-          test -f \
-            flutter-sdk/bin/cache/artifacts/engine/android-arm64-release/flutter.jar
-
-          test -f \
-            flutter-sdk/bin/cache/artifacts/engine/android-x64-profile/flutter.jar
-
-          test -f \
-            flutter-sdk/bin/cache/artifacts/engine/android-x64-release/flutter.jar
-
-          test -f \
-            flutter-sdk/bin/cache/artifacts/engine/linux-arm64-profile/gen_snapshot
-
-          test -f \
-            flutter-sdk/bin/cache/artifacts/engine/linux-arm64-release/gen_snapshot
-
-          test -x \
-            flutter-sdk/bin/cache/dart-sdk/bin/dart
-
-          echo ""
-          echo "ALL SDK CHECKS PASSED."
-
-      # ----------------------------------------------------------
-      # Package
-      # ----------------------------------------------------------
+          tree flutter-sdk/bin/cache/artifacts/engine
 
       - name: Package SDK
-        shell: bash
         run: |
           set -e
 
-          tar \
-            -cJf \
-            flutter-linux-arm64.tar.xz \
-            flutter-sdk
+          tar -cJf flutter-linux-arm64.tar.xz flutter-sdk
 
           ls -lh flutter-linux-arm64.tar.xz
 
-      # ----------------------------------------------------------
-      # Verify package exists
-      # ----------------------------------------------------------
-
-      - name: Verify package
-        run: |
-          set -e
-
-          test -f flutter-linux-arm64.tar.xz
-
-          file flutter-linux-arm64.tar.xz
-
-          ls -lh flutter-linux-arm64.tar.xz
-
-      # ----------------------------------------------------------
-      # Upload final SDK
-      # ----------------------------------------------------------
-
-      - name: Upload final SDK
+      - name: Upload SDK package
         uses: actions/upload-artifact@v4
         with:
           name: flutter-linux-arm64-full-sdk
@@ -747,59 +384,46 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      # ----------------------------------------------------------
-      # Release
-      # ----------------------------------------------------------
+  release:
+    name: Create GitHub Release
+    needs: assemble-sdk
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download SDK package
+        uses: actions/download-artifact@v4
+        with:
+          name: flutter-linux-arm64-full-sdk
+          path: release
 
       - name: Generate release tag
         id: release
-        shell: bash
         run: |
           DATE="$(date -u +'%Y-%m-%d')"
-
           TAG="${DATE}-daily-build"
 
           echo "date=$DATE" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-          echo "DATE=$DATE"
-          echo "TAG=$TAG"
-
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
         run: |
           set -e
 
           TAG="${{ steps.release.outputs.tag }}"
           DATE="${{ steps.release.outputs.date }}"
 
-          echo "=========================================="
-          echo "Creating Release"
-          echo "Tag: $TAG"
-          echo "=========================================="
+          FILE="release/flutter-linux-arm64.tar.xz"
+
+          test -f "$FILE"
 
           gh release delete "$TAG" \
             --yes \
-            --cleanup-tag \
-            2>/dev/null || true
+            --cleanup-tag || true
 
           gh release create "$TAG" \
-            flutter-linux-arm64.tar.xz \
+            "$FILE" \
             --title "Flutter SDK Linux ARM64 - $DATE" \
-            --notes "Daily Flutter stable SDK with custom-built Engine artifacts for Linux ARM64 host devices.
-
-Flutter channel: stable
-Flutter Engine revision: $(cat flutter-sdk/bin/internal/engine.version)
-
-Included Engine targets:
-- Android ARM64 profile/release
-- Android x64 profile/release
-- Linux ARM64 gen_snapshot profile/release
-
-Dart SDK:
-- Linux ARM64
-
-This SDK is assembled from the Flutter stable revision used by this build." \
+            --notes "Daily Flutter SDK build with custom Engine artifacts and native Linux ARM64 Dart SDK." \
             --latest
