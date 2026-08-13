@@ -314,13 +314,23 @@ jobs:
           echo "--- complete ARM64 host toolchain ---"
           for f in flutter_tester impellerc; do
             p="$ENGINE_DIR/linux-arm64/$f"
-            test -x "$p"
+            test -x "$p" \
+              || { echo "FATAL: ARM64 host tool missing: $p"; exit 1; }
             file "$p" | tee /dev/stderr | grep -q "ARM aarch64"
           done
-          test -f "$ENGINE_DIR/linux-arm64/frontend_server_aot.dart.snapshot"
-          test -d "$ENGINE_DIR/linux-arm64/shader_lib"
-          test -f "$ENGINE_DIR/common/flutter_patched_sdk/platform_strong.dill"
-          test -f "$ENGINE_DIR/common/flutter_patched_sdk_product/platform_strong.dill"
+          HOST_GEN="$ENGINE_DIR/linux-arm64/gen_snapshot"
+          test -x "$HOST_GEN" \
+            || { echo "FATAL: host gen_snapshot missing: $HOST_GEN"; exit 1; }
+          file "$HOST_GEN" | grep -q "ARM aarch64" \
+            || { echo "FATAL: host gen_snapshot has wrong architecture"; exit 1; }
+          test -f "$ENGINE_DIR/linux-arm64/frontend_server_aot.dart.snapshot" \
+            || { echo "FATAL: frontend_server snapshot missing"; exit 1; }
+          test -d "$ENGINE_DIR/linux-arm64/shader_lib" \
+            || { echo "FATAL: shader_lib missing"; exit 1; }
+          test -f "$ENGINE_DIR/common/flutter_patched_sdk/platform_strong.dill" \
+            || { echo "FATAL: flutter_patched_sdk missing"; exit 1; }
+          test -f "$ENGINE_DIR/common/flutter_patched_sdk_product/platform_strong.dill" \
+            || { echo "FATAL: flutter_patched_sdk_product missing"; exit 1; }
 
           echo "--- complete Android engine cache ---"
           for dir in \
@@ -336,17 +346,21 @@ jobs:
           test -s "flutter-sdk/bin/cache/android-sdk.stamp"
 
           echo "--- android gen_snapshots (must all be ARM aarch64) ---"
-          n=0
-          while IFS= read -r f; do
-            file "$f"
-            file "$f" | grep -q "ARM aarch64" \
-              || { echo "FATAL: $f is not arm64"; exit 1; }
-            n=$((n+1))
-          done < <(find "$ENGINE_DIR" \
-                     -type f -name gen_snapshot -path "*linux-arm64*")
-          echo "verified $n arm64 gen_snapshot binaries"
-          # arm x arm64 x x64  X  profile x release = 6 expected
-          [ "$n" -eq 6 ] || { echo "FATAL: expected 6, got $n"; exit 1; }
+          COUNT=0
+          for CPU in arm arm64 x64; do
+            for MODE in profile release; do
+              GEN="$ENGINE_DIR/android-${CPU}-${MODE}/linux-arm64/gen_snapshot"
+              test -x "$GEN" \
+                || { echo "FATAL: $GEN missing"; exit 1; }
+              file "$GEN"
+              file "$GEN" | grep -q "ARM aarch64" \
+                || { echo "FATAL: $GEN has wrong architecture"; exit 1; }
+              COUNT=$((COUNT + 1))
+            done
+          done
+          [ "$COUNT" -eq 6 ] \
+            || { echo "FATAL: expected 6 Android gen_snapshots, got $COUNT"; exit 1; }
+          echo "verified $COUNT Android ARM64-host gen_snapshot binaries"
 
           # Final SDK command is run before packaging, after all injection.
           flutter-sdk/bin/flutter --version
