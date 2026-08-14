@@ -1,4 +1,4 @@
-# Flutter SDK (Linux ARM64) Daily Build — with Android AOT gen_snapshot
+# Flutter SDK (Linux ARM64) Weekly Build — with Android AOT gen_snapshot
 #
 # WHY THIS EXISTS / ROOT CAUSE
 # ---------------------------------------------------------------------------
@@ -45,12 +45,12 @@
 #     one Linux ARM64 offline SDK archive. The workflow does not build an app;
 #     its only deliverable is the ready-to-extract SDK.
 
-name: Flutter SDK (Linux ARM64) Daily Build
+name: Flutter SDK (Linux ARM64) Weekly Build
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "00 16 * * *"
+    - cron: "00 16 * * 1"
 
 permissions:
   contents: write
@@ -413,7 +413,7 @@ jobs:
           set -euo pipefail
           DATE="$(date -u +'%Y-%m-%d')"
           echo "date=$DATE"                 >> "$GITHUB_OUTPUT"
-          echo "tag=${DATE}-daily-build"    >> "$GITHUB_OUTPUT"
+          echo "tag=${DATE}-weekly-build"   >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         env:
